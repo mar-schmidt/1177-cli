@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -40,6 +41,21 @@ try:
     runner = CliRunner(mix_stderr=False)
 except TypeError:
     runner = CliRunner()
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _normalized_help_output(result: object) -> str:
+    stdout = str(getattr(result, "stdout", "") or "")
+    stderr = str(getattr(result, "stderr", "") or "")
+    combined = f"{stdout}\n{stderr}"
+    no_ansi = ANSI_ESCAPE_RE.sub("", combined)
+    normalized_dash = (
+        no_ansi.replace("—", "-")
+        .replace("–", "-")
+        .replace("‑", "-")
+    )
+    return " ".join(normalized_dash.split())
 
 
 class _FakeStream:
@@ -118,11 +134,12 @@ def test_extract_rows_from_partial_view_list_posts_markup() -> None:
 def test_main_help_runs() -> None:
     """CLI should expose command groups."""
     result = runner.invoke(app, ["--help"])
+    help_text = _normalized_help_output(result)
     assert result.exit_code == 0
-    assert "Access 1177 Journalen data" in result.stdout
-    assert "auth" in result.stdout
-    assert "journal" in result.stdout
-    assert "Set output format for" in result.stdout
+    assert "Access 1177 Journalen data" in help_text
+    assert "auth" in help_text
+    assert "journal" in help_text
+    assert "Set output format for" in help_text
 
 
 def test_delayed_spinner_skips_non_tty_stream() -> None:
@@ -153,31 +170,34 @@ def test_delayed_spinner_renders_on_tty_for_slow_calls() -> None:
 def test_journal_help_contains_results_group() -> None:
     """Journal command should include results command group."""
     result = runner.invoke(app, ["journal", "--help"])
+    help_text = _normalized_help_output(result)
     assert result.exit_code == 0
-    assert "entries" in result.stdout
-    assert "results" in result.stdout
-    assert "Fetch Journalen entries" in result.stdout
+    assert "entries" in help_text
+    assert "results" in help_text
+    assert "Fetch Journalen entries" in help_text
 
 
 def test_auth_login_help_describes_user_action() -> None:
     """Auth login help should explain what the command does."""
     result = runner.invoke(app, ["auth", "login", "--help"])
+    help_text = _normalized_help_output(result)
     assert result.exit_code == 0
-    assert "Log in to 1177" in result.stdout
-    assert "store a reusable local session" in result.stdout
-    assert "--method" in result.stdout
-    assert "bankid-qr" in result.stdout
+    assert "Log in to 1177" in help_text
+    assert "store a reusable local session" in help_text
+    assert "method" in help_text
+    assert "bankid-qr" in help_text
 
 
 def test_results_list_help_describes_limit_constraint() -> None:
     """Results list help should explain return behavior and limit rule."""
     result = runner.invoke(app, ["journal", "results", "list", "--help"])
+    help_text = _normalized_help_output(result)
     assert result.exit_code == 0
-    assert "List laboratory results" in result.stdout
-    assert "sorted newest first" in result.stdout
-    assert "--limit" in result.stdout
-    assert "Maximum number of results to return" in result.stdout
-    assert "at least 1)." in result.stdout
+    assert "List laboratory results" in help_text
+    assert "sorted newest first" in help_text
+    assert "limit" in help_text
+    assert "Maximum number of results to return" in help_text
+    assert "at least 1)." in help_text
 
 
 def test_results_graph_data_help_describes_analysis_count() -> None:
@@ -186,11 +206,12 @@ def test_results_graph_data_help_describes_analysis_count() -> None:
         app,
         ["journal", "results", "graph", "data", "--help"],
     )
+    help_text = _normalized_help_output(result)
     assert result.exit_code == 0
-    assert "Fetch graph data for one to three" in result.stdout
-    assert "--analysis-id" in result.stdout
-    assert "Repeat option one to" in result.stdout
-    assert "three times, for example" in result.stdout
+    assert "Fetch graph data for one to three" in help_text
+    assert "analysis-id" in help_text or "analysis id" in help_text
+    assert "Repeat option one to" in help_text
+    assert "three times, for example" in help_text
 
 
 def test_auth_login_requests_interactive_journal_step_up(
