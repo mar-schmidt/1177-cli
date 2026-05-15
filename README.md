@@ -18,17 +18,11 @@ python3 -m pip install -e .
 ## Commands
 
 ```bash
-1177 auth login --method bankid-qr
+1177 auth login
 1177 auth status
 1177 auth logout
-1177 auth probe-browser-parity --headless
 1177 journal entries list --page 1 --page-size 10
-```
-
-`probe-browser-parity` requires optional Playwright dependency:
-
-```bash
-python3 -m pip install -e ".[playwright]"
+1177 journal results list
 ```
 
 ## Output Contract
@@ -47,3 +41,23 @@ Errors are printed to stderr as JSON with:
 python3 -m pip install -e ".[dev]"
 pytest
 ```
+
+## Agent Skill
+
+This repo includes a packaged Agent Skill in `.agent/`.
+
+Local build:
+
+```bash
+python scripts/generate-skill-manifest.py
+python scripts/package-skill.py
+```
+
+The output archive is written to:
+
+```bash
+dist/1177-cli.skill
+```
+
+GitHub CI also builds this `.skill` file for each `push` and `pull_request`
+and uploads it as the `1177-cli-skill` workflow artifact.

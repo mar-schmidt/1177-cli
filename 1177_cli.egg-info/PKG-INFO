@@ -34,17 +34,11 @@ python3 -m pip install -e .
 ## Commands
 
 ```bash
-1177 auth login --method bankid-qr
+1177 auth login
 1177 auth status
 1177 auth logout
-1177 auth probe-browser-parity --headless
 1177 journal entries list --page 1 --page-size 10
-```
-
-`probe-browser-parity` requires optional Playwright dependency:
-
-```bash
-python3 -m pip install -e ".[playwright]"
+1177 journal results list
 ```
 
 ## Output Contract

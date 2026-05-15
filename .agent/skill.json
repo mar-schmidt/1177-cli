@@ -1,0 +1,28 @@
+{
+  "name": "1177-cli",
+  "version": "1.0.0",
+  "schemaVersion": "1",
+  "description": "Use this skill for the 1177 CLI that reads Journalen data with JSON-first outputs. Trigger when the user asks about 1177 auth, session state, journal entries, laboratory results, or how to fetch graph data correctly.\n",
+  "source": "https://raw.githubusercontent.com/mar-schmidt/1177-cli/master/.agent/SKILL.md",
+  "install": {
+    "pip": "pip install \"git+https://github.com/mar-schmidt/1177-cli.git\"",
+    "pipx": "pipx install \"git+https://github.com/mar-schmidt/1177-cli.git\""
+  },
+  "entrypoint": "1177",
+  "commands": [
+    "auth login",
+    "auth status",
+    "auth logout",
+    "journal entries list",
+    "journal results list",
+    "journal results detail",
+    "journal results graph analyses",
+    "journal results graph data"
+  ],
+  "compatibility": [
+    "claude-desktop",
+    "cursor",
+    "continue",
+    "generic-mcp"
+  ]
+}

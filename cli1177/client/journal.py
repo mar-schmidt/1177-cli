@@ -2097,6 +2097,19 @@ def _canonical_result_detail_key(normalized_label: str) -> str | None:
     return canonical_map.get(normalized_label)
 
 
+def _coerce_iso_date(value: object) -> str | None:
+    """Return YYYY-MM-DD when present, else None."""
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if len(raw) < 10:
+        return None
+    candidate = raw[:10]
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", candidate):
+        return candidate
+    return None
+
+
 def extract_results_from_partial_view(
     partial_html: str,
 ) -> list[dict[str, str | None]]:
@@ -2391,6 +2404,8 @@ def get_graphable_laboratory_analyses(
     if not isinstance(analysis_items, list):
         analysis_items = payload.get("Analyses")
     if not isinstance(analysis_items, list):
+        analysis_items = payload.get("AnalysisListItems")
+    if not isinstance(analysis_items, list):
         analysis_items = []
     normalized: list[dict[str, Any]] = []
     for item in analysis_items:
@@ -2409,6 +2424,7 @@ def get_graphable_laboratory_analyses(
                     item.get("Name") or item.get("AnalysisName") or ""
                 ),
                 "graphable": bool(item.get("Graphable", True)),
+                "count": int(item.get("Count", 0) or 0),
             },
         )
     return {
@@ -2486,6 +2502,105 @@ def get_laboratory_tool_data(
                 or item.get("ReviewStatus"),
             },
         )
+    if not normalized_series:
+        fallback_points: list[dict[str, Any]] = []
+        expected_total = 0
+
+        probe_poll = poll_laboratory_outcome_until_done(
+            client,
+            date_from=date_from,
+            date_to=date_to,
+            verification_token=verification_token,
+            timeout_seconds=6.0,
+            poll_interval_seconds=0.25,
+        )
+        probe_payload = probe_poll["payload"]
+        probe_partial = str(probe_poll.get("combined_partial_view", ""))
+        if not probe_partial:
+            probe_partial = str(probe_payload.get("PartialView", ""))
+        probe_rows = extract_results_from_partial_view(probe_partial)
+
+        analyses_payload = get_graphable_laboratory_analyses(
+            client,
+            verification_token=verification_token,
+        )
+        analyses = analyses_payload.get("analyses", [])
+        if isinstance(analyses, list):
+            count_by_id: dict[str, int] = {}
+            for analysis in analyses:
+                if not isinstance(analysis, dict):
+                    continue
+                analysis_id = str(analysis.get("analysis_id") or "").strip()
+                count_value = int(analysis.get("count", 0) or 0)
+                if analysis_id:
+                    count_by_id[analysis_id] = count_value
+            expected_total = sum(
+                count_by_id.get(selected_id, 0)
+                for selected_id in selected_ids
+            )
+
+        requested_from = _coerce_iso_date(date_from)
+        requested_to = _coerce_iso_date(date_to)
+        candidate_rows = probe_rows
+        if requested_from or requested_to:
+            filtered_rows: list[dict[str, str | None]] = []
+            for row in probe_rows:
+                row_date = _coerce_iso_date(row.get("entry_date"))
+                if row_date is None:
+                    continue
+                if requested_from and row_date < requested_from:
+                    continue
+                if requested_to and row_date > requested_to:
+                    continue
+                filtered_rows.append(row)
+            candidate_rows = filtered_rows
+
+        for row in candidate_rows:
+            row_id = str(row.get("result_id") or "").strip()
+            if not row_id:
+                continue
+            entry_date = str(row.get("entry_date") or "").strip()
+            detail = fetch_laboratory_outcome_detail(
+                client,
+                result_id=row_id,
+                verification_token=verification_token,
+            )
+            measurements = detail.get("detail_measurements", [])
+            detail_core = detail.get("detail_core", {})
+            if not isinstance(measurements, list):
+                measurements = []
+            if not isinstance(detail_core, dict):
+                detail_core = {}
+            point_date = str(
+                detail_core.get("sample_time")
+                or detail_core.get("reported_time")
+                or entry_date,
+            ).strip()
+            for measurement in measurements:
+                if not isinstance(measurement, dict):
+                    continue
+                analysis_code = str(
+                    measurement.get("analysis_code") or "",
+                ).strip()
+                if analysis_code not in selected_ids:
+                    continue
+                fallback_points.append(
+                    {
+                        "analysis_id": analysis_code,
+                        "date": point_date or None,
+                        "value": measurement.get("result_value"),
+                        "unit": measurement.get("analysis_unit"),
+                        "reference_interval": measurement.get(
+                            "reference_interval",
+                        ),
+                        "review_status": measurement.get("review_status"),
+                    },
+                )
+            if expected_total > 0 and len(fallback_points) >= expected_total:
+                break
+
+        if fallback_points:
+            normalized_series = fallback_points
     return {
         "ok": True,
         "analysis_ids": selected_ids,

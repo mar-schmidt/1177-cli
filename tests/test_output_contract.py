@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from typer.testing import CliRunner
 
+import cli1177.cli_common as cli_common
 import cli1177.client.journal as journal_client
 import cli1177.commands.auth as auth_commands
 import cli1177.commands.journal as journal_commands
@@ -35,6 +37,22 @@ from cli1177.client.journal import JournalBootstrap
 from cli1177.errors import CliError
 
 runner = CliRunner(mix_stderr=False)
+
+
+class _FakeStream:
+    def __init__(self, *, is_tty: bool) -> None:
+        self._is_tty = is_tty
+        self.writes: list[str] = []
+
+    def isatty(self) -> bool:
+        return self._is_tty
+
+    def write(self, value: str) -> int:
+        self.writes.append(value)
+        return len(value)
+
+    def flush(self) -> None:
+        return
 
 
 def test_print_error_payload_shape(capsys: object) -> None:
@@ -98,8 +116,35 @@ def test_main_help_runs() -> None:
     """CLI should expose command groups."""
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
+    assert "Access 1177 Journalen data" in result.stdout
     assert "auth" in result.stdout
     assert "journal" in result.stdout
+    assert "Set output format for" in result.stdout
+
+
+def test_delayed_spinner_skips_non_tty_stream() -> None:
+    """Delayed spinner should stay silent on non-interactive streams."""
+    stream = _FakeStream(is_tty=False)
+    with cli_common._DelayedSpinner(
+        stream=stream,
+        delay_seconds=0.01,
+        interval_seconds=0.01,
+    ):
+        time.sleep(0.04)
+    assert stream.writes == []
+
+
+def test_delayed_spinner_renders_on_tty_for_slow_calls() -> None:
+    """Delayed spinner should render when stream is interactive."""
+    stream = _FakeStream(is_tty=True)
+    with cli_common._DelayedSpinner(
+        stream=stream,
+        delay_seconds=0.01,
+        interval_seconds=0.01,
+    ):
+        time.sleep(0.05)
+    rendered = "".join(stream.writes)
+    assert "Loading..." in rendered
 
 
 def test_journal_help_contains_results_group() -> None:
@@ -108,6 +153,41 @@ def test_journal_help_contains_results_group() -> None:
     assert result.exit_code == 0
     assert "entries" in result.stdout
     assert "results" in result.stdout
+    assert "Fetch Journalen entries" in result.stdout
+
+
+def test_auth_login_help_describes_user_action() -> None:
+    """Auth login help should explain what the command does."""
+    result = runner.invoke(app, ["auth", "login", "--help"])
+    assert result.exit_code == 0
+    assert "Log in to 1177" in result.stdout
+    assert "store a reusable local session" in result.stdout
+    assert "--method" in result.stdout
+    assert "bankid-qr" in result.stdout
+
+
+def test_results_list_help_describes_limit_constraint() -> None:
+    """Results list help should explain return behavior and limit rule."""
+    result = runner.invoke(app, ["journal", "results", "list", "--help"])
+    assert result.exit_code == 0
+    assert "List laboratory results" in result.stdout
+    assert "sorted newest first" in result.stdout
+    assert "--limit" in result.stdout
+    assert "Maximum number of results to return" in result.stdout
+    assert "at least 1)." in result.stdout
+
+
+def test_results_graph_data_help_describes_analysis_count() -> None:
+    """Graph data help should explain analysis id requirements."""
+    result = runner.invoke(
+        app,
+        ["journal", "results", "graph", "data", "--help"],
+    )
+    assert result.exit_code == 0
+    assert "Fetch graph data for one to three" in result.stdout
+    assert "--analysis-id" in result.stdout
+    assert "Repeat option one to" in result.stdout
+    assert "three times, for example" in result.stdout
 
 
 def test_auth_login_requests_interactive_journal_step_up(
@@ -132,13 +212,6 @@ def test_auth_login_requests_interactive_journal_step_up(
         auth_commands,
         "_check_session_alive",
         lambda runtime: False,
-    )
-    monkeypatch.setattr(
-        auth_commands,
-        "login_with_bankid_qr",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("fallback flow should not run")
-        ),
     )
     monkeypatch.setattr(
         auth_commands,
@@ -188,13 +261,6 @@ def test_auth_login_persists_step_up_cookies(
         auth_commands,
         "_check_session_alive",
         lambda runtime: False,
-    )
-    monkeypatch.setattr(
-        auth_commands,
-        "login_with_bankid_qr",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("fallback flow should not run")
-        ),
     )
     monkeypatch.setattr(
         auth_commands,
@@ -281,13 +347,6 @@ def test_journal_results_list_reuses_session_after_successful_auth_login(
     )
     monkeypatch.setattr(
         auth_commands,
-        "login_with_bankid_qr",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("fallback flow should not run")
-        ),
-    )
-    monkeypatch.setattr(
-        auth_commands,
         "establish_journal_session",
         fake_establish_journal_session,
     )
@@ -332,6 +391,39 @@ def test_journal_results_list_reuses_session_after_successful_auth_login(
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     assert payload["result_count"] == 1
+
+
+def test_auth_login_failed_step_up_triggers_playwright_fallback(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    """Failed journal step-up should trigger optional browser fallback."""
+    fallback_called = {"value": False}
+
+    monkeypatch.setattr(
+        auth_commands,
+        "_check_session_alive",
+        lambda runtime: False,
+    )
+    monkeypatch.setattr(
+        auth_commands,
+        "establish_journal_session",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        auth_commands,
+        "login_with_playwright_fallback",
+        lambda: fallback_called.update(value=True),
+    )
+
+    state_file = tmp_path / "auth-state.json"
+    result = runner.invoke(
+        app,
+        ["auth", "login", "--allow-playwright-fallback"],
+        env={"CLI1177_AUTH_STATE_PATH": str(state_file)},
+    )
+    assert result.exit_code == 2
+    assert fallback_called["value"] is True
 
 
 def test_bankid_rfa9_progress_state_not_terminal() -> None:

@@ -9,7 +9,6 @@ from cli1177.cli_common import run_json
 from cli1177.client.auth import AuthState, clear_auth_state, save_auth_state
 from cli1177.client.bankid import (
     JOURNAL_DASHBOARD_URL,
-    login_with_bankid_qr,
     login_with_playwright_fallback,
 )
 from cli1177.client.http import HttpClient
@@ -18,7 +17,9 @@ from cli1177.client.parity import probe_with_playwright
 from cli1177.errors import CliError
 from cli1177.runtime import Runtime
 
-app = typer.Typer(help="Authentication lifecycle commands.")
+app = typer.Typer(
+    help="Manage login state before running journal data commands."
+)
 
 
 def _has_shib_cookie(cookies: list[dict[str, str]]) -> bool:
@@ -79,13 +80,24 @@ def _check_journal_session(
 @app.command("login")
 def login(
     ctx: typer.Context,
-    method: str = typer.Option("bankid-qr", "--method"),
+    method: str = typer.Option(
+        "bankid-qr",
+        "--method",
+        help="Choose login method. Currently only bankid-qr is supported.",
+    ),
     allow_playwright_fallback: bool = typer.Option(
         False,
         "--allow-playwright-fallback",
+        help=(
+            "Allow a browser fallback step when the standard BankID flow "
+            "fails."
+        ),
     ),
 ) -> None:
-    """Authenticate with 1177 using BankID QR flow."""
+    """Log in to 1177 and store a reusable local session.
+
+    Uses BankID QR login and verifies Journalen access before returning.
+    """
 
     def execute() -> dict[str, object]:
         runtime = _runtime(ctx)
@@ -116,48 +128,38 @@ def login(
                 exit_code=1,
                 details={"method": method},
             )
-        result = None
         journal_ready = establish_journal_session(
             runtime.client,
             allow_interactive_step_up=True,
             debug_trace=auth_trace,
         )
         if not journal_ready:
-            try:
-                result = login_with_bankid_qr(
-                    runtime.client,
-                    target_url=JOURNAL_DASHBOARD_URL,
-                )
-            except CliError:
-                if not allow_playwright_fallback:
-                    raise
+            if allow_playwright_fallback:
                 login_with_playwright_fallback()
-                raise
-            journal_ready = establish_journal_session(
-                runtime.client,
-                allow_interactive_step_up=False,
-                debug_trace=auth_trace,
+            raise CliError(
+                error="BankID authentication failed",
+                code="auth_required",
+                exit_code=exit_codes.AUTH,
+                details={"hint": "Retry `1177 auth login`."},
             )
 
         state = AuthState(
             cookies=runtime.client.cookies,
-            idp_host=result.idp_host if result else runtime.state.idp_host,
-            logged_in=journal_ready,
+            idp_host=runtime.state.idp_host,
+            logged_in=True,
             auth_method=method,
-            last_error=None if journal_ready else "journal_not_ready",
+            last_error=None,
         )
         save_auth_state(runtime.paths, state)
         runtime.state = state
         payload = {
-            "ok": journal_ready,
+            "ok": True,
             "auth_method": method,
             "idp_host": state.idp_host,
-            "target_url": (
-                result.target_url if result else JOURNAL_DASHBOARD_URL
-            ),
-            "poll_count": result.poll_count if result else 0,
-            "last_rfa": result.last_rfa if result else "",
-            "journal_ready": journal_ready,
+            "target_url": JOURNAL_DASHBOARD_URL,
+            "poll_count": 0,
+            "last_rfa": "",
+            "journal_ready": True,
         }
         if auth_trace is not None:
             payload["auth_trace"] = auth_trace
@@ -168,7 +170,7 @@ def login(
 
 @app.command("status")
 def status(ctx: typer.Context) -> None:
-    """Show current authentication status."""
+    """Show whether your saved 1177 session is still usable."""
 
     def execute() -> dict[str, object]:
         runtime = _runtime(ctx)
@@ -202,7 +204,7 @@ def status(ctx: typer.Context) -> None:
 
 @app.command("logout")
 def logout(ctx: typer.Context) -> None:
-    """Log out and remove local session state."""
+    """Sign out and clear the locally saved authentication session."""
 
     def execute() -> dict[str, object]:
         runtime = _runtime(ctx)
@@ -226,11 +228,26 @@ def logout(ctx: typer.Context) -> None:
 @app.command("probe-browser-parity")
 def probe_browser_parity(
     ctx: typer.Context,
-    url: str = typer.Option("https://journalen.1177.se/", "--url"),
-    headless: bool = typer.Option(True, "--headless/--headed"),
-    timeout_ms: int = typer.Option(30000, "--timeout-ms"),
+    url: str = typer.Option(
+        "https://journalen.1177.se/",
+        "--url",
+        help="Start URL to open when checking browser session behavior.",
+    ),
+    headless: bool = typer.Option(
+        True,
+        "--headless/--headed",
+        help="Run browser checks without or with a visible browser window.",
+    ),
+    timeout_ms: int = typer.Option(
+        30000,
+        "--timeout-ms",
+        help="Maximum time to wait for page navigation and redirects.",
+    ),
 ) -> None:
-    """Capture browser-side redirect/cookie telemetry with Playwright."""
+    """Collect browser-side redirect and cookie diagnostics.
+
+    Use this when API requests fail but you need browser parity debugging.
+    """
 
     def execute() -> dict[str, object]:
         runtime = _runtime(ctx)

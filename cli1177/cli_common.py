@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import itertools
+import sys
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -13,11 +16,79 @@ from cli1177.errors import CliError
 from cli1177.output import print_error, print_success_formatted
 from cli1177.runtime import Runtime
 
+_SPINNER_DELAY_SECONDS = 0.5
+_SPINNER_INTERVAL_SECONDS = 0.1
+_SPINNER_FRAMES = ("|", "/", "-", "\\")
+_SPINNER_MESSAGE = "Loading..."
+
+
+class _DelayedSpinner:
+    """Render a lightweight delayed spinner on stderr."""
+
+    def __init__(
+        self,
+        *,
+        stream: Any = None,
+        delay_seconds: float = _SPINNER_DELAY_SECONDS,
+        interval_seconds: float = _SPINNER_INTERVAL_SECONDS,
+        message: str = _SPINNER_MESSAGE,
+    ) -> None:
+        self._stream = stream if stream is not None else sys.stderr
+        self._delay_seconds = delay_seconds
+        self._interval_seconds = interval_seconds
+        self._message = message
+        self._frames = itertools.cycle(_SPINNER_FRAMES)
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._is_rendering = False
+
+    def __enter__(self) -> _DelayedSpinner:
+        self._thread = threading.Thread(
+            target=self._run,
+            name="cli1177-spinner",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        self._clear_line()
+
+    def _can_render(self) -> bool:
+        stream = self._stream
+        isatty = getattr(stream, "isatty", None)
+        if not callable(isatty):
+            return False
+        return bool(isatty())
+
+    def _run(self) -> None:
+        if self._stop_event.wait(self._delay_seconds):
+            return
+        if not self._can_render():
+            return
+        self._is_rendering = True
+        while not self._stop_event.wait(self._interval_seconds):
+            frame = next(self._frames)
+            self._stream.write(f"\r{frame} {self._message}")
+            self._stream.flush()
+
+    def _clear_line(self) -> None:
+        if not self._is_rendering:
+            return
+        clear_width = len(self._message) + 4
+        self._stream.write("\r" + (" " * clear_width) + "\r")
+        self._stream.flush()
+        self._is_rendering = False
+
 
 def run_json(callable_fn: Callable[[], dict[str, Any]]) -> None:
     """Run a command and print stable success/error payloads."""
     try:
-        payload = callable_fn()
+        with _DelayedSpinner():
+            payload = callable_fn()
         ctx = click.get_current_context(silent=True)
         runtime = ctx.obj if ctx else None
         output_format = "json"

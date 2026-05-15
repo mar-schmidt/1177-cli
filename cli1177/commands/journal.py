@@ -25,10 +25,16 @@ from cli1177.client.journal import (
 from cli1177.errors import CliError
 from cli1177.runtime import Runtime
 
-app = typer.Typer(help="Journal data commands.")
-entries_app = typer.Typer(help="Care documentation entry commands.")
-results_app = typer.Typer(help="Laboratory result commands.")
-results_graph_app = typer.Typer(help="Laboratory result graph commands.")
+app = typer.Typer(help="Fetch Journalen entries and laboratory results.")
+entries_app = typer.Typer(
+    help="List care documentation entries from your journal."
+)
+results_app = typer.Typer(
+    help="List and inspect laboratory results from your journal."
+)
+results_graph_app = typer.Typer(
+    help="Query graph-ready laboratory analysis data."
+)
 app.add_typer(entries_app, name="entries")
 app.add_typer(results_app, name="results")
 results_app.add_typer(results_graph_app, name="graph")
@@ -81,14 +87,41 @@ def _sort_results_newest_first(
 @entries_app.command("list")
 def list_entries(
     ctx: typer.Context,
-    page: int = typer.Option(1, "--page"),
-    page_size: int = typer.Option(10, "--page-size"),
-    sort_by: str = typer.Option("Date", "--sort-by"),
-    sort_order: str = typer.Option("desc", "--sort-order"),
-    date_from: str = typer.Option("", "--date-from"),
-    date_to: str = typer.Option("", "--date-to"),
+    page: int = typer.Option(
+        1,
+        "--page",
+        help="Result page number to request from the entries list.",
+    ),
+    page_size: int = typer.Option(
+        10,
+        "--page-size",
+        help="Number of entries to request per page.",
+    ),
+    sort_by: str = typer.Option(
+        "Date",
+        "--sort-by",
+        help='Entry field used for sorting, for example "Date".',
+    ),
+    sort_order: str = typer.Option(
+        "desc",
+        "--sort-order",
+        help='Sort direction: "asc" or "desc".',
+    ),
+    date_from: str = typer.Option(
+        "",
+        "--date-from",
+        help="Include entries on or after this date.",
+    ),
+    date_to: str = typer.Option(
+        "",
+        "--date-to",
+        help="Include entries on or before this date.",
+    ),
 ) -> None:
-    """List care documentation entries."""
+    """List care documentation entries from your journal.
+
+    Use filters and paging options to narrow the returned entry set.
+    """
 
     def execute() -> dict[str, object]:
         runtime = _runtime(ctx)
@@ -170,14 +203,41 @@ def list_entries(
 @results_app.command("list")
 def list_results(
     ctx: typer.Context,
-    date_from: str = typer.Option("", "--date-from"),
-    date_to: str = typer.Option("", "--date-to"),
-    answer_type: str = typer.Option("", "--answer-type"),
-    ordered_by: str = typer.Option("", "--ordered-by"),
-    care_unit: str = typer.Option("", "--care-unit"),
-    limit: int = typer.Option(20, "--limit"),
+    date_from: str = typer.Option(
+        "",
+        "--date-from",
+        help="Include results on or after this date.",
+    ),
+    date_to: str = typer.Option(
+        "",
+        "--date-to",
+        help="Include results on or before this date.",
+    ),
+    answer_type: str = typer.Option(
+        "",
+        "--answer-type",
+        help="Filter by result answer type shown in Journalen.",
+    ),
+    ordered_by: str = typer.Option(
+        "",
+        "--ordered-by",
+        help="Filter by ordering provider shown in Journalen.",
+    ),
+    care_unit: str = typer.Option(
+        "",
+        "--care-unit",
+        help="Filter by care unit shown in Journalen.",
+    ),
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        help="Maximum number of results to return (must be at least 1).",
+    ),
 ) -> None:
-    """List laboratory results."""
+    """List laboratory results from your journal.
+
+    Results are sorted newest first and truncated to the chosen limit.
+    """
 
     def execute() -> dict[str, object]:
         runtime = _runtime(ctx)
@@ -272,10 +332,21 @@ def list_results(
 @results_app.command("detail")
 def result_detail(
     ctx: typer.Context,
-    result_id: str = typer.Option(..., "--result-id"),
-    include_raw: bool = typer.Option(False, "--include-raw/--no-include-raw"),
+    result_id: str = typer.Option(
+        ...,
+        "--result-id",
+        help="Required result identifier from `journal results list`.",
+    ),
+    include_raw: bool = typer.Option(
+        False,
+        "--include-raw/--no-include-raw",
+        help="Include raw HTML and payload fields in the response.",
+    ),
 ) -> None:
-    """Fetch detail for one laboratory result."""
+    """Fetch detailed data for one laboratory result.
+
+    Use `--result-id` from a previously listed result row.
+    """
 
     def execute() -> dict[str, object]:
         runtime = _runtime(ctx)
@@ -320,7 +391,7 @@ def result_detail(
 
 @results_graph_app.command("analyses")
 def result_graph_analyses(ctx: typer.Context) -> None:
-    """List graphable analyses for laboratory results."""
+    """List analysis identifiers that can be used for result graphs."""
 
     def execute() -> dict[str, object]:
         runtime = _runtime(ctx)
@@ -356,11 +427,29 @@ def result_graph_analyses(ctx: typer.Context) -> None:
 @results_graph_app.command("data")
 def result_graph_data(
     ctx: typer.Context,
-    analysis_ids: list[str] = typer.Option([], "--analysis-id"),
-    date_from: str = typer.Option("", "--date-from"),
-    date_to: str = typer.Option("", "--date-to"),
+    analysis_ids: list[str] = typer.Option(
+        [],
+        "--analysis-id",
+        help=(
+            "Analysis id to include. Repeat option one to three times, "
+            "for example --analysis-id A --analysis-id B."
+        ),
+    ),
+    date_from: str = typer.Option(
+        "",
+        "--date-from",
+        help="Include graph points on or after this date.",
+    ),
+    date_to: str = typer.Option(
+        "",
+        "--date-to",
+        help="Include graph points on or before this date.",
+    ),
 ) -> None:
-    """Fetch graph data for one to three analyses."""
+    """Fetch graph data for one to three laboratory analyses.
+
+    Pass one to three `--analysis-id` values to choose series to return.
+    """
 
     def execute() -> dict[str, object]:
         runtime = _runtime(ctx)
