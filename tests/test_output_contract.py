@@ -36,7 +36,10 @@ from cli1177.client.journal import extract_results_from_partial_view
 from cli1177.client.journal import JournalBootstrap
 from cli1177.errors import CliError
 
-runner = CliRunner(mix_stderr=False)
+try:
+    runner = CliRunner(mix_stderr=False)
+except TypeError:
+    runner = CliRunner()
 
 
 class _FakeStream:
