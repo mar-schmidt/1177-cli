@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "1177-cli"
+version = "0.1.0"
+description = "LLM-friendly CLI for 1177/journalen data access."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "beautifulsoup4>=4.12.0",
+  "httpx>=0.27.0",
+  "pillow>=10.2.0",
+  "qrcode>=7.4.2",
+  "typer>=0.12.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+playwright = ["playwright>=1.54.0"]
+
+[project.scripts]
+1177 = "cli1177.main:run"
+
+[tool.setuptools.packages.find]
+include = ["cli1177*"]

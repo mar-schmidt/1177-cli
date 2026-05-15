@@ -1,0 +1,2 @@
+[console_scripts]
+1177 = cli1177.main:run

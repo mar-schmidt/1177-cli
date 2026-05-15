@@ -1,0 +1,65 @@
+Metadata-Version: 2.4
+Name: 1177-cli
+Version: 0.1.0
+Summary: LLM-friendly CLI for 1177/journalen data access.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: beautifulsoup4>=4.12.0
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: pillow>=10.2.0
+Requires-Dist: qrcode>=7.4.2
+Requires-Dist: typer>=0.12.3
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+Provides-Extra: playwright
+Requires-Dist: playwright>=1.54.0; extra == "playwright"
+
+# 1177 CLI
+
+LLM-friendly CLI for 1177/journalen data access.
+
+## Goals
+
+- JSON-first output for deterministic automation
+- Stable error schema and exit codes
+- BankID QR login flow for terminal use
+- Session-safe handling for sensitive healthcare data
+
+## Install
+
+```bash
+python3 -m pip install -e .
+```
+
+## Commands
+
+```bash
+1177 auth login --method bankid-qr
+1177 auth status
+1177 auth logout
+1177 auth probe-browser-parity --headless
+1177 journal entries list --page 1 --page-size 10
+```
+
+`probe-browser-parity` requires optional Playwright dependency:
+
+```bash
+python3 -m pip install -e ".[playwright]"
+```
+
+## Output Contract
+
+Success payloads are printed to stdout as JSON.
+
+Errors are printed to stderr as JSON with:
+
+- `error`: human readable message
+- `code`: stable machine code
+- `details`: machine-readable context
+
+## Development
+
+```bash
+python3 -m pip install -e ".[dev]"
+pytest
+```
