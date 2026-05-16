@@ -19,6 +19,7 @@ python3 -m pip install -e .
 
 ```bash
 1177 auth login
+1177 auth login --qr-output web
 1177 auth status
 1177 auth logout
 1177 journal entries list --page 1 --page-size 10
@@ -34,6 +35,11 @@ Errors are printed to stderr as JSON with:
 - `error`: human readable message
 - `code`: stable machine code
 - `details`: machine-readable context
+
+For auth QR flows, stderr can also include machine-readable events:
+
+- `bankid_qr_frame`: base64 QR frame payloads (`--qr-output base64|both`)
+- `bankid_qr_web_url`: localhost page URL (`--qr-output web`)
 
 ## Development
 

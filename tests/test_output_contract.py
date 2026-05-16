@@ -547,6 +547,91 @@ def test_auth_login_qr_output_base64_disables_terminal_render(
     assert observed["clear_terminal_qr_screen"] is True
 
 
+def test_auth_login_qr_output_web_emits_url_and_disables_terminal_render(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    """Web mode should expose local page URL and keep QR off terminal."""
+    observed: dict[str, object] = {}
+    server_state = {
+        "started": 0,
+        "stopped": 0,
+        "last_png": b"",
+    }
+
+    class _FakeQrWebServer:
+        page_url = "http://127.0.0.1:41234/"
+
+        def update_png(self, png_bytes: bytes) -> None:
+            server_state["last_png"] = png_bytes
+
+        def stop(self) -> None:
+            server_state["stopped"] = int(server_state["stopped"]) + 1
+
+    def fake_start_qr_web_server() -> _FakeQrWebServer:
+        server_state["started"] = int(server_state["started"]) + 1
+        return _FakeQrWebServer()
+
+    def fake_establish_journal_session(
+        client: object,
+        *,
+        allow_interactive_step_up: bool = False,
+        debug_trace: list[dict[str, object]] | None = None,
+        qr_frame_callback: object = None,
+        render_terminal_qr: bool = True,
+        clear_terminal_qr_screen: bool = True,
+    ) -> bool:
+        assert client
+        assert allow_interactive_step_up is True
+        assert debug_trace is None
+        observed["render_terminal_qr"] = render_terminal_qr
+        observed["clear_terminal_qr_screen"] = clear_terminal_qr_screen
+        assert callable(qr_frame_callback)
+        qr_frame_callback(b"web-png-bytes")
+        return True
+
+    monkeypatch.setattr(
+        auth_commands,
+        "_check_session_alive",
+        lambda runtime: False,
+    )
+    monkeypatch.setattr(
+        auth_commands,
+        "_start_qr_web_server",
+        fake_start_qr_web_server,
+    )
+    monkeypatch.setattr(
+        auth_commands,
+        "establish_journal_session",
+        fake_establish_journal_session,
+    )
+    state_file = tmp_path / "auth-state.json"
+    xdg_state_home = tmp_path / "xdg-state"
+    result = runner.invoke(
+        app,
+        ["auth", "login", "--qr-output", "web"],
+        env={
+            "CLI1177_AUTH_STATE_PATH": str(state_file),
+            "XDG_STATE_HOME": str(xdg_state_home),
+        },
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["qr_output"] == "web"
+    assert payload["qr_frames_emitted"] == 1
+    assert observed["render_terminal_qr"] is False
+    assert observed["clear_terminal_qr_screen"] is True
+    assert server_state["started"] == 1
+    assert server_state["stopped"] == 1
+    assert server_state["last_png"] == b"web-png-bytes"
+    event_lines = [line for line in result.stderr.splitlines() if line.strip()]
+    assert event_lines
+    event = json.loads(event_lines[0])
+    assert event["event"] == "bankid_qr_web_url"
+    assert event["url"] == "http://127.0.0.1:41234/"
+
+
 def test_journal_results_list_reuses_session_after_successful_auth_login(
     monkeypatch: object,
     tmp_path: Path,

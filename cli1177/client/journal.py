@@ -10,6 +10,7 @@ import unicodedata
 from dataclasses import dataclass
 from html import unescape
 from typing import Any, Callable
+from urllib.parse import quote
 from urllib.parse import urljoin
 from urllib.parse import urlparse
 
@@ -22,6 +23,7 @@ from cli1177.client.http import HttpClient
 from cli1177.errors import CliError
 
 BASE_URL = "https://journalen.1177.se"
+MVK_URL = "https://e-tjanster.1177.se/mvk"
 
 AJAX_HEADERS = {
     "X-Requested-With": "XMLHttpRequest",
@@ -43,6 +45,16 @@ def _debug_log(
     data: dict[str, object],
 ) -> None:
     return
+
+
+def _build_interactive_login_url(target_url: str) -> str:
+    """Build explicit Shibboleth login URL for BankID step-up."""
+    encoded_target = quote(target_url, safe="")
+    return (
+        "https://e-tjanster.1177.se/Shibboleth.sso/Login"
+        f"?target={encoded_target}"
+        "&authnContextClassRef=urn%3Alocal.methodid.ccp19"
+    )
 
 
 @dataclass(slots=True)
@@ -1617,6 +1629,65 @@ def establish_journal_session(
         status_code=response.status_code,
     )
     response_host = urlparse(response_url).netloc
+    response_path = urlparse(response_url).path.lower()
+    if (
+        allow_interactive_step_up
+        and "journalen.1177.se" in response_host
+        and response_path.startswith("/loggedout/")
+    ):
+        login_url = _build_interactive_login_url(dashboard_url)
+        # region agent log
+        _debug_log(
+            run_id="journal-session",
+            hypothesis_id="N1",
+            location="journal.py:establish_journal_session",
+            message="restart_from_loggedout_via_shib_login",
+            data={
+                "response_host": response_host,
+                "response_path": response_path,
+                "login_host": urlparse(login_url).netloc,
+                "login_path": urlparse(login_url).path,
+            },
+        )
+        # endregion
+        try:
+            response = client.request(
+                "GET",
+                login_url,
+                allow_status={200, 302, 401, 403},
+            )
+        except CliError as exc:
+            status_code = int(exc.details.get("status_code", 0))
+            host = str(exc.details.get("host", ""))
+            should_retry_with_mvk = (
+                exc.code == "upstream_error"
+                and status_code in {500, 502, 503, 504}
+                and host == "e-tjanster.1177.se"
+            )
+            if not should_retry_with_mvk:
+                raise
+            fallback_login_url = _build_interactive_login_url(MVK_URL)
+            # region agent log
+            _debug_log(
+                run_id="journal-session",
+                hypothesis_id="N2",
+                location="journal.py:establish_journal_session",
+                message="fallback_to_mvk_login_target",
+                data={
+                    "status_code": status_code,
+                    "host": host,
+                    "fallback_host": urlparse(fallback_login_url).netloc,
+                    "fallback_path": urlparse(fallback_login_url).path,
+                },
+            )
+            # endregion
+            response = client.request(
+                "GET",
+                fallback_login_url,
+                allow_status={200, 302, 401, 403},
+            )
+        response_url = str(response.url)
+        response_host = urlparse(response_url).netloc
     if _is_authenticated_journal_url(response_url, response.status_code):
         probe = client.request(
             "GET",

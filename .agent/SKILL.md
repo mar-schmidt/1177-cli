@@ -109,17 +109,34 @@ When an auth-required error occurs:
 2. If re-auth is needed, run:
 
 ```bash
+1177 auth login --qr-output web
+```
+
+Preferred behavior for LLM clients:
+
+- use `--qr-output web`
+- open the emitted localhost URL in an embedded browser/webview for the user
+- keep that embedded page visible until login succeeds or fails
+
+During `--qr-output web` login, parse stderr JSON lines for:
+
+- `event: bankid_qr_web_url`
+- `url`: local page with the live QR image
+
+Base64 fallback when embedding is unavailable:
+
+```bash
 1177 auth login --qr-output both
 ```
 
-During login, parse QR frame events written to stderr as JSON lines:
+For `--qr-output base64|both`, parse QR frame events from stderr:
 
 - `event: bankid_qr_frame`
 - `image_base64`: preferred for direct UI rendering
 - `image_path`: fallback PNG path when base64 rendering is unavailable
 
-Render the QR in the UI from `image_base64` so users can scan it with their
-phone.
+Render the QR from `image_base64` only when embedded web display is not
+available.
 
 ### Required domain whitelist
 
@@ -169,7 +186,7 @@ inherit the user's interactive shell environment, so `1177` may not resolve
 unless you use an absolute path or export `PATH` first.
 
 After switching to the local terminal, continue with the normal auth flow:
-`1177 auth status` then `1177 auth login --qr-output both` when required.
+`1177 auth status` then `1177 auth login --qr-output web` when required.
 
 ## Journal commands
 
