@@ -11,8 +11,14 @@ from pathlib import Path
 class AppPaths:
     """Filesystem paths used by this CLI."""
 
-    state_file: Path
+    primary_state_file: Path
+    global_state_file: Path
     audit_log: Path
+
+    @property
+    def state_file(self) -> Path:
+        """Backwards-compatible primary auth state path."""
+        return self.primary_state_file
 
 
 def _default_state_dir() -> Path:
@@ -24,11 +30,16 @@ def _default_state_dir() -> Path:
 
 def get_app_paths() -> AppPaths:
     """Return normalized app paths."""
+    global_state_file = _default_state_dir() / "auth-state.json"
     override = os.environ.get("CLI1177_AUTH_STATE_PATH")
     if override:
-        state_file = Path(override).expanduser()
+        primary_state_file = Path(override).expanduser()
     else:
-        state_file = _default_state_dir() / "auth-state.json"
-    audit_log = state_file.parent / "audit.log"
-    return AppPaths(state_file=state_file, audit_log=audit_log)
+        primary_state_file = global_state_file
+    audit_log = primary_state_file.parent / "audit.log"
+    return AppPaths(
+        primary_state_file=primary_state_file,
+        global_state_file=global_state_file,
+        audit_log=audit_log,
+    )
 

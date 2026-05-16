@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import Callable
+
 import typer
 
 from cli1177 import exit_codes
@@ -58,6 +66,9 @@ def _check_journal_session(
     *,
     allow_interactive_step_up: bool = False,
     debug_trace: list[dict[str, object]] | None = None,
+    qr_frame_callback: Callable[[bytes], None] | None = None,
+    render_terminal_qr: bool = True,
+    clear_terminal_qr_screen: bool = True,
 ) -> bool:
     """Check whether journalen session is available for data requests."""
     if not runtime.state.cookies:
@@ -66,15 +77,31 @@ def _check_journal_session(
         cookies=runtime.state.cookies,
         max_retries=runtime.max_retries,
     )
-    ready = establish_journal_session(
-        client,
-        allow_interactive_step_up=allow_interactive_step_up,
-        debug_trace=debug_trace,
-    )
+    session_kwargs: dict[str, object] = {
+        "allow_interactive_step_up": allow_interactive_step_up,
+        "debug_trace": debug_trace,
+    }
+    if qr_frame_callback is not None:
+        session_kwargs["qr_frame_callback"] = qr_frame_callback
+        session_kwargs["render_terminal_qr"] = render_terminal_qr
+        session_kwargs["clear_terminal_qr_screen"] = clear_terminal_qr_screen
+    ready = establish_journal_session(client, **session_kwargs)
     if ready:
         runtime.state.cookies = client.cookies
         save_auth_state(runtime.paths, runtime.state)
     return ready
+
+
+def _state_path_metadata(runtime: Runtime) -> dict[str, str]:
+    return {
+        "primary_state_path": str(runtime.paths.primary_state_file),
+        "global_state_path": str(runtime.paths.global_state_file),
+        "state_path_source": (
+            "default"
+            if runtime.paths.primary_state_file == runtime.paths.global_state_file
+            else "override"
+        ),
+    }
 
 
 @app.command("login")
@@ -93,6 +120,11 @@ def login(
             "fails."
         ),
     ),
+    qr_output: str = typer.Option(
+        "terminal",
+        "--qr-output",
+        help="Choose QR output mode: terminal, base64, or both.",
+    ),
 ) -> None:
     """Log in to 1177 and store a reusable local session.
 
@@ -101,6 +133,55 @@ def login(
 
     def execute() -> dict[str, object]:
         runtime = _runtime(ctx)
+        valid_qr_outputs = {"terminal", "base64", "both"}
+        if qr_output not in valid_qr_outputs:
+            raise CliError(
+                error="Unsupported QR output mode",
+                code="invalid_argument",
+                exit_code=1,
+                details={
+                    "field": "qr_output",
+                    "value": qr_output,
+                    "allowed": sorted(valid_qr_outputs),
+                },
+            )
+
+        qr_image_path: Path | None = None
+        qr_frame_count = 0
+
+        qr_frame_callback = None
+        render_terminal_qr = True
+        clear_terminal_qr_screen = True
+        if qr_output in {"base64", "both"}:
+            qr_image_path = Path(tempfile.gettempdir()) / (
+                f"1177-bankid-qr-{os.getpid()}.png"
+            )
+
+            def emit_qr_frame(png_bytes: bytes) -> None:
+                nonlocal qr_frame_count
+                qr_frame_count += 1
+                assert qr_image_path is not None
+                qr_image_path.write_bytes(png_bytes)
+                event = {
+                    "event": "bankid_qr_frame",
+                    "frame_index": qr_frame_count,
+                    "encoding": "base64",
+                    "image_base64": base64.b64encode(png_bytes).decode(
+                        "ascii",
+                    ),
+                    "image_path": str(qr_image_path),
+                }
+                sys.stderr.write(
+                    json.dumps(event, ensure_ascii=False) + "\n",
+                )
+                sys.stderr.flush()
+
+            qr_frame_callback = emit_qr_frame
+            if qr_output == "base64":
+                render_terminal_qr = False
+            else:
+                clear_terminal_qr_screen = False
+
         auth_trace: list[dict[str, object]] | None = None
         if runtime.debug_auth:
             auth_trace = []
@@ -109,6 +190,9 @@ def login(
             runtime,
             allow_interactive_step_up=True,
             debug_trace=auth_trace,
+            qr_frame_callback=qr_frame_callback,
+            render_terminal_qr=render_terminal_qr,
+            clear_terminal_qr_screen=clear_terminal_qr_screen,
         )
         if session_alive and journal_ready:
             payload = {
@@ -117,7 +201,9 @@ def login(
                 "auth_method": runtime.state.auth_method,
                 "idp_host": runtime.state.idp_host,
                 "journal_ready": True,
+                "qr_output": qr_output,
             }
+            payload.update(_state_path_metadata(runtime))
             if auth_trace is not None:
                 payload["auth_trace"] = auth_trace
             return payload
@@ -128,10 +214,19 @@ def login(
                 exit_code=1,
                 details={"method": method},
             )
+        session_kwargs: dict[str, object] = {
+            "allow_interactive_step_up": True,
+            "debug_trace": auth_trace,
+        }
+        if qr_frame_callback is not None:
+            session_kwargs["qr_frame_callback"] = qr_frame_callback
+            session_kwargs["render_terminal_qr"] = render_terminal_qr
+            session_kwargs["clear_terminal_qr_screen"] = (
+                clear_terminal_qr_screen
+            )
         journal_ready = establish_journal_session(
             runtime.client,
-            allow_interactive_step_up=True,
-            debug_trace=auth_trace,
+            **session_kwargs,
         )
         if not journal_ready:
             if allow_playwright_fallback:
@@ -160,7 +255,12 @@ def login(
             "poll_count": 0,
             "last_rfa": "",
             "journal_ready": True,
+            "qr_output": qr_output,
+            "qr_frames_emitted": qr_frame_count,
         }
+        if qr_image_path is not None:
+            payload["qr_image_path"] = str(qr_image_path)
+        payload.update(_state_path_metadata(runtime))
         if auth_trace is not None:
             payload["auth_trace"] = auth_trace
         return payload
@@ -195,6 +295,7 @@ def status(ctx: typer.Context) -> None:
             "auth_method": runtime.state.auth_method,
             "idp_host": runtime.state.idp_host,
         }
+        payload.update(_state_path_metadata(runtime))
         if auth_trace is not None:
             payload["auth_trace"] = auth_trace
         return payload

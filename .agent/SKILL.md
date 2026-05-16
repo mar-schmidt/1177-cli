@@ -97,6 +97,30 @@ Exit codes:
 Use `1177 auth status` before data calls in headless workflows to verify
 `logged_in` and `journal_ready`.
 
+### Agent login flow
+
+When an auth-required error occurs:
+
+1. Run `1177 auth status` first and inspect:
+   - `logged_in`
+   - `journal_ready`
+   - `state_path_source`
+   - `primary_state_path`
+2. If re-auth is needed, run:
+
+```bash
+1177 auth login --qr-output both
+```
+
+During login, parse QR frame events written to stderr as JSON lines:
+
+- `event: bankid_qr_frame`
+- `image_base64`: preferred for direct UI rendering
+- `image_path`: fallback PNG path when base64 rendering is unavailable
+
+Render the QR in the UI from `image_base64` so users can scan it with their
+phone.
+
 ## Journal commands
 
 ```bash

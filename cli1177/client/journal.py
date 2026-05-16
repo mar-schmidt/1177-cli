@@ -9,7 +9,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from html import unescape
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urljoin
 from urllib.parse import urlparse
 
@@ -499,7 +499,12 @@ def _probe_grp_pollstatus(
     return payload
 
 
-def _render_grp_qr(png_bytes: bytes, prompt_text: str) -> None:
+def _render_grp_qr(
+    png_bytes: bytes,
+    prompt_text: str,
+    *,
+    clear_screen: bool = True,
+) -> None:
     """Render a compact QR for journal step-up auth."""
     try:
         image = Image.open(io.BytesIO(png_bytes)).convert("L")
@@ -526,7 +531,8 @@ def _render_grp_qr(png_bytes: bytes, prompt_text: str) -> None:
             else:
                 row.append(" ")
         lines.append("".join(row))
-    print("\033[2J\033[H", end="")
+    if clear_screen:
+        print("\033[2J\033[H", end="")
     print("\n".join(lines))
     print(f"\n{prompt_text}")
 
@@ -535,6 +541,10 @@ def _run_grp_step_up(
     client: HttpClient,
     grp_this_url: str,
     prompt_text: str,
+    *,
+    qr_frame_callback: Callable[[bytes], None] | None = None,
+    render_terminal_qr: bool = True,
+    clear_terminal_qr_screen: bool = True,
 ) -> tuple[bool, str, str]:
     """Run a Journalen step-up BankID flow from grp/this."""
     parsed = urlparse(grp_this_url)
@@ -638,7 +648,14 @@ def _run_grp_step_up(
             },
         )
         # endregion
-        _render_grp_qr(qr_resp.content, prompt_text)
+        if qr_frame_callback is not None:
+            qr_frame_callback(qr_resp.content)
+        if render_terminal_qr:
+            _render_grp_qr(
+                qr_resp.content,
+                prompt_text,
+                clear_screen=clear_terminal_qr_screen,
+            )
         time.sleep(1.0)
     return False, grp_this_url, ""
 
@@ -684,6 +701,9 @@ def _follow_idp_chain(
     *,
     allow_interactive_step_up: bool,
     debug_trace: list[dict[str, object]] | None = None,
+    qr_frame_callback: Callable[[bytes], None] | None = None,
+    render_terminal_qr: bool = True,
+    clear_terminal_qr_screen: bool = True,
 ) -> bool:
     """Traverse intermediate IdP pages until Journalen or failure."""
     current_url = response_url
@@ -784,6 +804,9 @@ def _follow_idp_chain(
                     client,
                     current_url,
                     prompt_text,
+                    qr_frame_callback=qr_frame_callback,
+                    render_terminal_qr=render_terminal_qr,
+                    clear_terminal_qr_screen=clear_terminal_qr_screen,
                 )
                 next_form = _extract_saml_form(new_html, new_url)
                 # region agent log
@@ -1565,6 +1588,9 @@ def establish_journal_session(
     *,
     allow_interactive_step_up: bool = False,
     debug_trace: list[dict[str, object]] | None = None,
+    qr_frame_callback: Callable[[bytes], None] | None = None,
+    render_terminal_qr: bool = True,
+    clear_terminal_qr_screen: bool = True,
 ) -> bool:
     """Ensure a valid Journalen browser session exists."""
     dashboard_url = f"{BASE_URL}/Dashboard"
@@ -1627,6 +1653,9 @@ def establish_journal_session(
         response.text,
         allow_interactive_step_up=allow_interactive_step_up,
         debug_trace=debug_trace,
+        qr_frame_callback=qr_frame_callback,
+        render_terminal_qr=render_terminal_qr,
+        clear_terminal_qr_screen=clear_terminal_qr_screen,
     ):
         return False
     probe = client.request(

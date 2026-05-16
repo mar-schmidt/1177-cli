@@ -63,11 +63,21 @@ def _normalize_cookie_records(raw_cookies: object) -> list[CookieRecord]:
     return []
 
 
-def load_auth_state(paths: AppPaths) -> AuthState:
-    """Load state from disk. Return defaults when missing."""
-    if not paths.state_file.exists():
-        return AuthState()
-    raw = json.loads(paths.state_file.read_text(encoding="utf-8"))
+def _is_valid_state(state: AuthState) -> bool:
+    """Return True when state can be used for authenticated requests."""
+    return state.logged_in and bool(state.cookies)
+
+
+def _load_state_file(state_file: Path) -> AuthState | None:
+    """Best-effort load from one state file."""
+    if not state_file.exists():
+        return None
+    try:
+        raw = json.loads(state_file.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    if not isinstance(raw, dict):
+        return None
     return AuthState(
         cookies=_normalize_cookie_records(raw.get("cookies", [])),
         idp_host=raw.get("idp_host"),
@@ -77,9 +87,32 @@ def load_auth_state(paths: AppPaths) -> AuthState:
     )
 
 
+def load_auth_state(paths: AppPaths) -> AuthState:
+    """Load state from disk. Return defaults when missing."""
+    primary = _load_state_file(paths.primary_state_file)
+    if primary is not None and _is_valid_state(primary):
+        return primary
+    if paths.primary_state_file != paths.global_state_file:
+        global_state = _load_state_file(paths.global_state_file)
+        if global_state is not None and _is_valid_state(global_state):
+            return global_state
+    if primary is not None:
+        return primary
+    return AuthState()
+
+
+def _write_state_file(state_file: Path, payload: dict[str, object]) -> None:
+    """Persist one state file with strict local permissions."""
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.chmod(state_file, 0o600)
+
+
 def save_auth_state(paths: AppPaths, state: AuthState) -> None:
     """Persist state with strict local permissions."""
-    paths.state_file.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "cookies": state.cookies,
         "idp_host": state.idp_host,
@@ -87,15 +120,14 @@ def save_auth_state(paths: AppPaths, state: AuthState) -> None:
         "auth_method": state.auth_method,
         "last_error": state.last_error,
     }
-    paths.state_file.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    os.chmod(paths.state_file, 0o600)
+    _write_state_file(paths.primary_state_file, payload)
+    if paths.primary_state_file != paths.global_state_file:
+        _write_state_file(paths.global_state_file, payload)
 
 
 def clear_auth_state(paths: AppPaths) -> None:
     """Delete persisted state file."""
-    if paths.state_file.exists():
-        paths.state_file.unlink()
+    for state_file in (paths.primary_state_file, paths.global_state_file):
+        if state_file.exists():
+            state_file.unlink()
 

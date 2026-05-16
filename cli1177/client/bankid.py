@@ -9,6 +9,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from html import unescape
+from typing import Callable
 from urllib.parse import quote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -126,7 +127,11 @@ def _is_terminal_failure(rfa_code: str, status_text: str) -> bool:
     return False
 
 
-def render_png_to_terminal(png_bytes: bytes) -> None:
+def render_png_to_terminal(
+    png_bytes: bytes,
+    *,
+    clear_screen: bool = True,
+) -> None:
     """Render PNG QR using unicode blocks in terminal."""
     try:
         image = Image.open(io.BytesIO(png_bytes)).convert("L")
@@ -167,7 +172,8 @@ def render_png_to_terminal(png_bytes: bytes) -> None:
             else:
                 row.append(" ")
         lines.append("".join(row))
-    print("\033[2J\033[H", end="")
+    if clear_screen:
+        print("\033[2J\033[H", end="")
     print("\n".join(lines))
     print("\nOpen BankID app and scan the QR code.")
 
@@ -406,6 +412,9 @@ def login_with_bankid_qr(
     target_url: str = JOURNAL_DASHBOARD_URL,
     timeout_s: int = 180,
     poll_limit: int = 240,
+    qr_frame_callback: Callable[[bytes], None] | None = None,
+    render_terminal_qr: bool = True,
+    clear_terminal_qr_screen: bool = True,
 ) -> BankIdLoginResult:
     """Authenticate through BankID QR flow."""
     effective_target = target_url
@@ -626,7 +635,13 @@ def login_with_bankid_qr(
                 qr_url,
                 params={"id": str(now_ms)},
             )
-            render_png_to_terminal(qr_response.content)
+            if qr_frame_callback is not None:
+                qr_frame_callback(qr_response.content)
+            if render_terminal_qr:
+                render_png_to_terminal(
+                    qr_response.content,
+                    clear_screen=clear_terminal_qr_screen,
+                )
         except CliError as exc:
             # After the user confirms in BankID, QR can disappear before the
             # final callback is emitted. Keep polling instead of failing.

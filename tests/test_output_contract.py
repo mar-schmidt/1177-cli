@@ -22,6 +22,9 @@ from cli1177.redact import redact_payload
 from cli1177.client.bankid import _is_terminal_failure
 from cli1177.client.bankid import _extract_saml_form
 from cli1177.client.journal import _parse_json_response
+from cli1177.client.auth import AuthState as PersistedAuthState
+from cli1177.client.auth import load_auth_state, save_auth_state
+from cli1177.config import get_app_paths
 from cli1177.client.journal import (
     _extract_saml_form as _journal_extract_saml_form,
 )
@@ -243,10 +246,14 @@ def test_auth_login_requests_interactive_journal_step_up(
         fake_establish_journal_session,
     )
     state_file = tmp_path / "auth-state.json"
+    xdg_state_home = tmp_path / "xdg-state"
     result = runner.invoke(
         app,
         ["auth", "login"],
-        env={"CLI1177_AUTH_STATE_PATH": str(state_file)},
+        env={
+            "CLI1177_AUTH_STATE_PATH": str(state_file),
+            "XDG_STATE_HOME": str(xdg_state_home),
+        },
     )
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
@@ -292,15 +299,200 @@ def test_auth_login_persists_step_up_cookies(
         fake_establish_journal_session,
     )
     state_file = tmp_path / "auth-state.json"
+    xdg_state_home = tmp_path / "xdg-state"
     result = runner.invoke(
         app,
         ["auth", "login"],
-        env={"CLI1177_AUTH_STATE_PATH": str(state_file)},
+        env={
+            "CLI1177_AUTH_STATE_PATH": str(state_file),
+            "XDG_STATE_HOME": str(xdg_state_home),
+        },
     )
     assert result.exit_code == 0
     state_payload = json.loads(state_file.read_text(encoding="utf-8"))
     cookie_names = [item["name"] for item in state_payload["cookies"]]
     assert cookie_names == ["journal_session"]
+
+
+def test_load_auth_state_falls_back_to_global_path(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    """Primary override path should fallback to valid global state."""
+    xdg_state_home = tmp_path / "xdg-state"
+    primary_file = tmp_path / "override" / "auth-state.json"
+    global_file = xdg_state_home / "1177-cli" / "auth-state.json"
+    global_file.parent.mkdir(parents=True, exist_ok=True)
+    global_payload = {
+        "cookies": [
+            {
+                "name": "session",
+                "value": "cookie-1",
+                "domain": "journalen.1177.se",
+                "path": "/",
+            }
+        ],
+        "idp_host": "idp.example.test",
+        "logged_in": True,
+        "auth_method": "bankid-qr",
+        "last_error": None,
+    }
+    global_file.write_text(
+        json.dumps(global_payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLI1177_AUTH_STATE_PATH", str(primary_file))
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_state_home))
+    state = load_auth_state(get_app_paths())
+    assert state.logged_in is True
+    assert state.cookies[0]["name"] == "session"
+    assert state.idp_host == "idp.example.test"
+
+
+def test_save_auth_state_mirrors_primary_to_global(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    """Saving auth state should update both override and global paths."""
+    xdg_state_home = tmp_path / "xdg-state"
+    primary_file = tmp_path / "override" / "auth-state.json"
+    global_file = xdg_state_home / "1177-cli" / "auth-state.json"
+    monkeypatch.setenv("CLI1177_AUTH_STATE_PATH", str(primary_file))
+    monkeypatch.setenv("XDG_STATE_HOME", str(xdg_state_home))
+    paths = get_app_paths()
+    state = PersistedAuthState(
+        cookies=[
+            {
+                "name": "session",
+                "value": "cookie-2",
+                "domain": "journalen.1177.se",
+                "path": "/",
+            }
+        ],
+        idp_host="idp.example.test",
+        logged_in=True,
+        auth_method="bankid-qr",
+        last_error=None,
+    )
+    save_auth_state(paths, state)
+    primary_payload = json.loads(primary_file.read_text(encoding="utf-8"))
+    global_payload = json.loads(global_file.read_text(encoding="utf-8"))
+    assert primary_payload["logged_in"] is True
+    assert primary_payload == global_payload
+
+
+def test_auth_login_qr_output_both_emits_base64_and_qr_flags(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    """Both mode should emit QR frame event and set render flags."""
+    observed: dict[str, object] = {}
+
+    def fake_establish_journal_session(
+        client: object,
+        *,
+        allow_interactive_step_up: bool = False,
+        debug_trace: list[dict[str, object]] | None = None,
+        qr_frame_callback: object = None,
+        render_terminal_qr: bool = True,
+        clear_terminal_qr_screen: bool = True,
+    ) -> bool:
+        assert client
+        assert allow_interactive_step_up is True
+        assert debug_trace is None
+        observed["render_terminal_qr"] = render_terminal_qr
+        observed["clear_terminal_qr_screen"] = clear_terminal_qr_screen
+        assert callable(qr_frame_callback)
+        qr_frame_callback(b"png-bytes")
+        return True
+
+    monkeypatch.setattr(
+        auth_commands,
+        "_check_session_alive",
+        lambda runtime: False,
+    )
+    monkeypatch.setattr(
+        auth_commands,
+        "establish_journal_session",
+        fake_establish_journal_session,
+    )
+    state_file = tmp_path / "auth-state.json"
+    xdg_state_home = tmp_path / "xdg-state"
+    result = runner.invoke(
+        app,
+        ["auth", "login", "--qr-output", "both"],
+        env={
+            "CLI1177_AUTH_STATE_PATH": str(state_file),
+            "XDG_STATE_HOME": str(xdg_state_home),
+        },
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["qr_output"] == "both"
+    assert payload["qr_frames_emitted"] == 1
+    assert payload["state_path_source"] == "override"
+    assert observed["render_terminal_qr"] is True
+    assert observed["clear_terminal_qr_screen"] is False
+    event_lines = [line for line in result.stderr.splitlines() if line.strip()]
+    assert event_lines
+    event = json.loads(event_lines[0])
+    assert event["event"] == "bankid_qr_frame"
+    assert event["frame_index"] == 1
+    assert event["image_base64"] == "cG5nLWJ5dGVz"
+    assert Path(event["image_path"]).exists()
+
+
+def test_auth_login_qr_output_base64_disables_terminal_render(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    """Base64 mode should disable terminal QR rendering."""
+    observed: dict[str, object] = {}
+
+    def fake_establish_journal_session(
+        client: object,
+        *,
+        allow_interactive_step_up: bool = False,
+        debug_trace: list[dict[str, object]] | None = None,
+        qr_frame_callback: object = None,
+        render_terminal_qr: bool = True,
+        clear_terminal_qr_screen: bool = True,
+    ) -> bool:
+        assert client
+        assert allow_interactive_step_up is True
+        assert debug_trace is None
+        observed["render_terminal_qr"] = render_terminal_qr
+        observed["clear_terminal_qr_screen"] = clear_terminal_qr_screen
+        assert callable(qr_frame_callback)
+        qr_frame_callback(b"png-bytes")
+        return True
+
+    monkeypatch.setattr(
+        auth_commands,
+        "_check_session_alive",
+        lambda runtime: False,
+    )
+    monkeypatch.setattr(
+        auth_commands,
+        "establish_journal_session",
+        fake_establish_journal_session,
+    )
+    state_file = tmp_path / "auth-state.json"
+    xdg_state_home = tmp_path / "xdg-state"
+    result = runner.invoke(
+        app,
+        ["auth", "login", "--qr-output", "base64"],
+        env={
+            "CLI1177_AUTH_STATE_PATH": str(state_file),
+            "XDG_STATE_HOME": str(xdg_state_home),
+        },
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["qr_output"] == "base64"
+    assert observed["render_terminal_qr"] is False
+    assert observed["clear_terminal_qr_screen"] is True
 
 
 def test_journal_results_list_reuses_session_after_successful_auth_login(
@@ -402,7 +594,11 @@ def test_journal_results_list_reuses_session_after_successful_auth_login(
     )
 
     state_file = tmp_path / "auth-state.json"
-    env = {"CLI1177_AUTH_STATE_PATH": str(state_file)}
+    xdg_state_home = tmp_path / "xdg-state"
+    env = {
+        "CLI1177_AUTH_STATE_PATH": str(state_file),
+        "XDG_STATE_HOME": str(xdg_state_home),
+    }
     login_result = runner.invoke(app, ["auth", "login"], env=env)
     assert login_result.exit_code == 0
 
@@ -441,10 +637,14 @@ def test_auth_login_failed_step_up_triggers_playwright_fallback(
     )
 
     state_file = tmp_path / "auth-state.json"
+    xdg_state_home = tmp_path / "xdg-state"
     result = runner.invoke(
         app,
         ["auth", "login", "--allow-playwright-fallback"],
-        env={"CLI1177_AUTH_STATE_PATH": str(state_file)},
+        env={
+            "CLI1177_AUTH_STATE_PATH": str(state_file),
+            "XDG_STATE_HOME": str(xdg_state_home),
+        },
     )
     assert result.exit_code == 2
     assert fallback_called["value"] is True
