@@ -25,3 +25,8 @@ playwright = ["playwright>=1.54.0"]
 
 [tool.setuptools.packages.find]
 include = ["cli1177*"]
+
+[tool.pytest.ini_options]
+markers = [
+  "live_bankid: requires manual BankID pre-login and live endpoints",
+]

@@ -4,7 +4,7 @@ version: 1.0.0
 description: >
   Use this skill for the 1177 CLI that reads Journalen data with JSON-first
   outputs. Trigger when the user asks about 1177 auth, session state, journal
-  entries, laboratory results, or how to fetch graph data correctly.
+  entries, diagnoses, laboratory results, or graph data workflows.
 author: marcus
 repo: https://github.com/mar-schmidt/1177-cli
 install:
@@ -31,7 +31,7 @@ tags:
 Use this skill when a user wants to:
 
 - log in to 1177 and verify usable session state
-- fetch journal entries or laboratory result rows
+- fetch journal entries, diagnosis rows, or laboratory result rows
 - fetch graph-ready data points for one to three analyses
 - script deterministic JSON output for automation
 
@@ -44,6 +44,7 @@ Primary command areas:
 
 - `1177 auth ...` for login and session checks
 - `1177 journal entries ...` for care documentation entries
+- `1177 journal diagnoses ...` for diagnosis lists and detailed diagnosis data
 - `1177 journal results ...` for laboratory result lists and details
 - `1177 journal results graph ...` for graphable analyses and graph points
 
@@ -152,12 +153,14 @@ For agents to fully execute auth and data flows, allow outbound access to:
 data requests fail in a way that indicates environment blocking, the agent
 should switch execution to the user's local terminal session.
 
-Use platform-specific terminal launch methods when needed:
+Use platform-specific terminal launch methods if* needed:
 
 - macOS: `osascript` (run commands in Terminal/iTerm session)
 - Windows: PowerShell + terminal launcher (for example `wt` or `cmd`)
 - Linux: system terminal launcher (for example `x-terminal-emulator`,
   `gnome-terminal`, or `konsole`)
+
+* If you are running in a sandbox environment
 
 #### macOS `osascript` notes for graph data
 
@@ -192,9 +195,34 @@ After switching to the local terminal, continue with the normal auth flow:
 
 ```bash
 1177 journal entries list --page 1 --page-size 10
+1177 journal diagnoses list
+1177 journal diagnoses detail --diagnosis-id <id>
 1177 journal results list
 1177 journal results detail --result-id <id>
 ```
+
+### Diagnoses output structure
+
+`1177 journal diagnoses list` returns structured rows under `diagnoses` with
+keys such as:
+
+- `diagnosis_id`
+- `recorded_date`
+- `diagnosis_code` (when available)
+- `diagnosis_name`
+- `recording_provider`
+- `care_unit`
+
+`1177 journal diagnoses detail` returns structured fields in `detail_core`
+when available, including:
+
+- `diagnosis_code`
+- `diagnosis_name`
+- `recorded_date`
+- `recording_provider`
+- `care_unit`
+- `diagnosis_type`
+- `review_status`
 
 ## Graph data: correct workflow
 
@@ -225,6 +253,8 @@ Rules:
 - Pass at most three `--analysis-id`.
 - Repeat the option for each id. Do not comma-pack into one argument.
 - Use `analyses` output as the source of valid ids.
+- `1177 journal results graph data` may return slowly from upstream 1177 APIs.
+  Wait for completion before treating the call as failed.
 
 Expected graph payload fields:
 

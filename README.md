@@ -23,6 +23,8 @@ python3 -m pip install -e .
 1177 auth status
 1177 auth logout
 1177 journal entries list --page 1 --page-size 10
+1177 journal diagnoses list
+1177 journal diagnoses detail --diagnosis-id dx-123
 1177 journal results list
 ```
 
@@ -47,6 +49,30 @@ For auth QR flows, stderr can also include machine-readable events:
 python3 -m pip install -e ".[dev]"
 pytest
 ```
+
+Run only the contract test module:
+
+```bash
+pytest tests/test_output_contract.py
+```
+
+Run only live tests by marker (default behavior is skip unless enabled):
+
+```bash
+pytest -m live_bankid tests/test_live_api_contract.py
+```
+
+Run live contract tests against real endpoints (manual pre-login reuse):
+
+```bash
+1177 auth login
+export CLI1177_AUTH_STATE_PATH="$HOME/.local/state/1177-cli/auth-state.json"
+export CLI1177_LIVE_BANKID=1
+pytest -m live_bankid tests/test_live_api_contract.py
+```
+
+Live tests are opt-in and skipped unless both environment variables are set.
+The auth state file must already exist and contain a journal-ready session.
 
 ## Agent Skill
 

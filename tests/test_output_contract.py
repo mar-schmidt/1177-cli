@@ -15,7 +15,9 @@ import cli1177.cli_common as cli_common
 import cli1177.client.journal as journal_client
 import cli1177.commands.auth as auth_commands
 import cli1177.commands.journal as journal_commands
+from cli1177.commands.journal import _sort_diagnoses_newest_first
 from cli1177.commands.journal import _sort_results_newest_first
+from cli1177.client.journal import extract_diagnoses_from_partial_view
 from cli1177.client.journal import extract_rows_from_partial_view
 from cli1177.client.http import HttpClient
 from cli1177.main import app
@@ -23,6 +25,7 @@ from cli1177.output import print_error
 from cli1177.redact import redact_payload
 from cli1177.client.bankid import _is_terminal_failure
 from cli1177.client.bankid import _extract_saml_form
+from cli1177.client.bankid import _parse_poll_payload
 from cli1177.client.journal import _parse_json_response
 from cli1177.client.auth import AuthState as PersistedAuthState
 from cli1177.client.auth import load_auth_state, save_auth_state
@@ -34,10 +37,12 @@ from cli1177.client.journal import _extract_next_idp_url
 from cli1177.client.journal import _req_to_sign_in_url
 from cli1177.client.bankid import _is_retryable_location
 from cli1177.client.journal import poll_care_documentation
+from cli1177.client.journal import fetch_diagnosis_detail
 from cli1177.client.journal import fetch_laboratory_outcome_detail
 from cli1177.client.journal import get_graphable_laboratory_analyses
 from cli1177.client.journal import get_laboratory_tool_data
 from cli1177.client.journal import poll_laboratory_outcome
+from cli1177.client.journal import poll_diagnosis
 from cli1177.client.journal import extract_results_from_partial_view
 from cli1177.client.journal import JournalBootstrap
 from cli1177.errors import CliError
@@ -232,6 +237,14 @@ def test_journal_help_contains_results_group() -> None:
     assert "Fetch Journalen entries" in help_text
 
 
+def test_journal_help_contains_diagnoses_group() -> None:
+    """Journal command should include diagnoses command group."""
+    result = runner.invoke(app, ["journal", "--help"])
+    help_text = _normalized_help_output(result)
+    assert result.exit_code == 0
+    assert "diagnoses" in help_text
+
+
 def test_auth_login_help_describes_user_action() -> None:
     """Auth login help should explain what the command does."""
     result = runner.invoke(app, ["auth", "login", "--help"])
@@ -253,6 +266,17 @@ def test_results_list_help_describes_limit_constraint() -> None:
     assert "limit" in help_text
     assert "Maximum number of results to return" in help_text
     assert "at least 1)." in help_text
+
+
+def test_diagnoses_list_help_describes_limit_constraint() -> None:
+    """Diagnoses list help should explain return behavior and limit rule."""
+    result = runner.invoke(app, ["journal", "diagnoses", "list", "--help"])
+    help_text = _normalized_help_output(result)
+    assert result.exit_code == 0
+    assert "List diagnosis entries" in help_text
+    assert "sorted newest first" in help_text
+    assert "limit" in help_text
+    assert "Maximum number of diagnoses to return" in help_text
 
 
 def test_results_graph_data_help_describes_analysis_count() -> None:
@@ -750,6 +774,361 @@ def test_journal_results_list_reuses_session_after_successful_auth_login(
     assert payload["result_count"] == 1
 
 
+def test_journal_diagnoses_list_reuses_session_after_auth_login(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    """A successful login should be enough for diagnoses list command."""
+
+    def fake_establish_journal_session(
+        client: object,
+        *,
+        allow_interactive_step_up: bool = False,
+        debug_trace: list[dict[str, object]] | None = None,
+    ) -> bool:
+        assert allow_interactive_step_up is True
+        assert debug_trace is None
+        client.set_cookies(
+            [
+                {
+                    "name": "journal_session",
+                    "value": "cookie-2",
+                    "domain": "journalen.1177.se",
+                    "path": "/",
+                }
+            ]
+        )
+        return True
+
+    def fake_bootstrap_diagnosis(
+        client: object,
+        *,
+        debug_trace: list[dict[str, object]] | None = None,
+    ) -> JournalBootstrap:
+        assert client
+        assert debug_trace is None
+        return JournalBootstrap(
+            verification_token="token-dx",
+            page_url="https://journalen.1177.se/JournalCategories/Diagnosis",
+        )
+
+    def fake_poll_diagnosis_until_done(
+        client: object,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        assert client
+        assert kwargs["verification_token"] == "token-dx"
+        payload = {
+            "TotalNumberOfRows": 1,
+            "DataIsLoading": False,
+            "DataFetchingForAllBatchesIsDone": True,
+            "ErrorOccurred": False,
+            "DataFetchingTimedOut": False,
+            "ShouldFetchMore": False,
+            "PartialView": "<ul></ul>",
+        }
+        return {
+            "payload": payload,
+            "combined_partial_view": "<ul></ul>",
+            "attempts": 1,
+            "elapsed_ms": 0,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr(
+        auth_commands,
+        "_check_session_alive",
+        lambda runtime: False,
+    )
+    monkeypatch.setattr(
+        auth_commands,
+        "establish_journal_session",
+        fake_establish_journal_session,
+    )
+    monkeypatch.setattr(
+        journal_commands,
+        "bootstrap_diagnosis",
+        fake_bootstrap_diagnosis,
+    )
+    monkeypatch.setattr(
+        journal_commands,
+        "keep_alive",
+        lambda _client: {},
+    )
+    monkeypatch.setattr(
+        journal_commands,
+        "poll_diagnosis_until_done",
+        fake_poll_diagnosis_until_done,
+    )
+    monkeypatch.setattr(
+        journal_commands,
+        "extract_diagnoses_from_partial_view",
+        lambda _partial: [
+            {
+                "diagnosis_id": "dx-1",
+                "recorded_date": "2026-03-12T10:00:00",
+                "diagnosis_code": "E11.9",
+                "diagnosis_name": "Diabetes",
+            }
+        ],
+    )
+
+    state_file = tmp_path / "auth-state.json"
+    xdg_state_home = tmp_path / "xdg-state"
+    env = {
+        "CLI1177_AUTH_STATE_PATH": str(state_file),
+        "XDG_STATE_HOME": str(xdg_state_home),
+    }
+    login_result = runner.invoke(app, ["auth", "login"], env=env)
+    assert login_result.exit_code == 0
+
+    result = runner.invoke(
+        app,
+        ["journal", "diagnoses", "list", "--limit", "1"],
+        env=env,
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["diagnosis_count"] == 1
+    assert payload["diagnoses"][0]["diagnosis_code"] == "E11.9"
+
+
+def test_journal_entries_list_reuses_session_after_auth_login(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    """A successful login should be enough for entries list command."""
+
+    def fake_establish_journal_session(
+        client: object,
+        *,
+        allow_interactive_step_up: bool = False,
+        debug_trace: list[dict[str, object]] | None = None,
+    ) -> bool:
+        assert allow_interactive_step_up is True
+        assert debug_trace is None
+        client.set_cookies(
+            [
+                {
+                    "name": "journal_session",
+                    "value": "cookie-entries",
+                    "domain": "journalen.1177.se",
+                    "path": "/",
+                }
+            ]
+        )
+        return True
+
+    def fake_bootstrap_care_documentation(
+        client: object,
+        *,
+        debug_trace: list[dict[str, object]] | None = None,
+    ) -> JournalBootstrap:
+        assert client
+        assert debug_trace is None
+        return JournalBootstrap(
+            verification_token="token-entries",
+            page_url=(
+                "https://journalen.1177.se/"
+                "JournalCategories/CareDocumentation"
+            ),
+        )
+
+    def fake_poll_care_documentation_until_done(
+        client: object,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        assert client
+        assert kwargs["verification_token"] == "token-entries"
+        payload = {
+            "TotalNumberOfRows": 2,
+            "DataIsLoading": False,
+            "DataFetchingForAllBatchesIsDone": True,
+            "ErrorOccurred": False,
+            "DataFetchingTimedOut": False,
+            "ShouldFetchMore": False,
+            "PartialView": "<ul></ul>",
+        }
+        return {
+            "payload": payload,
+            "combined_partial_view": "<ul></ul>",
+            "attempts": 2,
+            "elapsed_ms": 35,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr(
+        auth_commands,
+        "_check_session_alive",
+        lambda runtime: False,
+    )
+    monkeypatch.setattr(
+        auth_commands,
+        "establish_journal_session",
+        fake_establish_journal_session,
+    )
+    monkeypatch.setattr(
+        journal_commands,
+        "bootstrap_care_documentation",
+        fake_bootstrap_care_documentation,
+    )
+    monkeypatch.setattr(
+        journal_commands,
+        "keep_alive",
+        lambda _client: {"heartbeat": "ok"},
+    )
+    monkeypatch.setattr(
+        journal_commands,
+        "poll_care_documentation_until_done",
+        fake_poll_care_documentation_until_done,
+    )
+    monkeypatch.setattr(
+        journal_commands,
+        "extract_rows_from_partial_view",
+        lambda _partial: [
+            {
+                "entry_id": "entry-1",
+                "entry_date": "2026-03-12T10:00:00",
+                "summary": "Anteckning 1",
+            },
+            {
+                "entry_id": "entry-2",
+                "entry_date": "2026-03-11T09:00:00",
+                "summary": "Anteckning 2",
+            },
+        ],
+    )
+
+    state_file = tmp_path / "auth-state.json"
+    xdg_state_home = tmp_path / "xdg-state"
+    env = {
+        "CLI1177_AUTH_STATE_PATH": str(state_file),
+        "XDG_STATE_HOME": str(xdg_state_home),
+    }
+    login_result = runner.invoke(app, ["auth", "login"], env=env)
+    assert login_result.exit_code == 0
+
+    result = runner.invoke(
+        app,
+        [
+            "journal",
+            "entries",
+            "list",
+            "--page",
+            "2",
+            "--page-size",
+            "10",
+            "--sort-by",
+            "Date",
+            "--sort-order",
+            "desc",
+        ],
+        env=env,
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["page"] == 2
+    assert payload["page_size"] == 10
+    assert payload["entry_count"] == 2
+    assert payload["total_rows"] == 2
+    assert payload["entries"][0]["entry_id"] == "entry-1"
+    assert payload["polling"]["attempts"] == 2
+    assert payload["poll_status"]["should_fetch_more"] is False
+    assert payload["bootstrap"]["token_found"] is True
+    assert payload["keepalive"]["heartbeat"] == "ok"
+    assert payload["keepalive_error"] is None
+
+
+def test_journal_diagnoses_detail_uses_structured_payload(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    """Diagnoses detail command should return stable structured fields."""
+
+    def fake_establish_journal_session(
+        client: object,
+        *,
+        allow_interactive_step_up: bool = False,
+        debug_trace: list[dict[str, object]] | None = None,
+    ) -> bool:
+        assert allow_interactive_step_up is True
+        assert debug_trace is None
+        client.set_cookies(
+            [
+                {
+                    "name": "journal_session",
+                    "value": "cookie-3",
+                    "domain": "journalen.1177.se",
+                    "path": "/",
+                }
+            ]
+        )
+        return True
+
+    monkeypatch.setattr(
+        auth_commands,
+        "_check_session_alive",
+        lambda runtime: False,
+    )
+    monkeypatch.setattr(
+        auth_commands,
+        "establish_journal_session",
+        fake_establish_journal_session,
+    )
+    monkeypatch.setattr(
+        journal_commands,
+        "bootstrap_diagnosis",
+        lambda _client, **_kwargs: JournalBootstrap(
+            verification_token="token-dx",
+            page_url=(
+                "https://journalen.1177.se/JournalCategories/Diagnosis"
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        journal_commands,
+        "fetch_diagnosis_detail",
+        lambda _client, **_kwargs: {
+            "detail_core": {
+                "diagnosis_code": "E11.9",
+                "diagnosis_name": "Diabetes",
+                "recorded_date": "2026-03-12",
+                "recording_provider": "Dr X",
+                "care_unit": "Vardenhet A",
+            },
+            "detail_extra": {"okand_etikett": "Extra"},
+            "detail_fields": {"diagnoskod": "E11.9"},
+            "detail_text": "Diagnoskod E11.9",
+            "detail_html": "<div>raw</div>",
+            "detail_payload": {"DetailView": "<div>raw</div>"},
+        },
+    )
+
+    state_file = tmp_path / "auth-state.json"
+    xdg_state_home = tmp_path / "xdg-state"
+    env = {
+        "CLI1177_AUTH_STATE_PATH": str(state_file),
+        "XDG_STATE_HOME": str(xdg_state_home),
+    }
+    login_result = runner.invoke(app, ["auth", "login"], env=env)
+    assert login_result.exit_code == 0
+
+    result = runner.invoke(
+        app,
+        ["journal", "diagnoses", "detail", "--diagnosis-id", "dx-1"],
+        env=env,
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["diagnosis_id"] == "dx-1"
+    assert payload["detail_core"]["diagnosis_code"] == "E11.9"
+    assert "detail_html" not in payload
+    assert "detail_payload" not in payload
+
+
 def test_auth_login_failed_step_up_triggers_playwright_fallback(
     monkeypatch: object,
     tmp_path: Path,
@@ -999,6 +1378,111 @@ def test_parse_json_response_html_requires_auth() -> None:
         assert exc.code == "auth_required"
         return
     assert False, "expected auth_required for HTML login response"
+
+
+def test_bootstrap_care_documentation_extracts_token() -> None:
+    """Care documentation bootstrap should return token and page URL."""
+    requested: dict[str, object] = {}
+
+    class FakeClient:
+        def request(self, method: str, url: str, **kwargs: object) -> object:
+            requested["method"] = method
+            requested["url"] = url
+            requested["kwargs"] = kwargs
+
+            class Response:
+                def __init__(self) -> None:
+                    self.text = (
+                        '<input name="__RequestVerificationToken" '
+                        'value="token-caredoc">'
+                    )
+                    self.url = (
+                        "https://journalen.1177.se/"
+                        "JournalCategories/CareDocumentation"
+                    )
+                    self.status_code = 200
+
+            return Response()
+
+    result = journal_client.bootstrap_care_documentation(FakeClient())
+    assert requested["method"] == "GET"
+    assert str(requested["url"]).endswith(
+        "/JournalCategories/CareDocumentation",
+    )
+    assert result.verification_token == "token-caredoc"
+    assert str(result.page_url).endswith("/JournalCategories/CareDocumentation")
+
+
+def test_bootstrap_laboratory_outcome_extracts_token() -> None:
+    """Laboratory bootstrap should return token and page URL."""
+
+    class FakeClient:
+        def request(self, method: str, url: str, **kwargs: object) -> object:
+            assert method == "GET"
+            assert kwargs == {}
+
+            class Response:
+                def __init__(self) -> None:
+                    self.text = (
+                        '<input name="__RequestVerificationToken" '
+                        'value="token-lab">'
+                    )
+                    self.url = (
+                        "https://journalen.1177.se/"
+                        "JournalCategories/LaboratoryOutcome"
+                    )
+                    self.status_code = 200
+
+            assert str(url).endswith("/JournalCategories/LaboratoryOutcome")
+            return Response()
+
+    result = journal_client.bootstrap_laboratory_outcome(FakeClient())
+    assert result.verification_token == "token-lab"
+    assert str(result.page_url).endswith("/JournalCategories/LaboratoryOutcome")
+
+
+def test_bootstrap_diagnosis_extracts_token() -> None:
+    """Diagnosis bootstrap should return token and page URL."""
+
+    class FakeClient:
+        def request(self, method: str, url: str, **kwargs: object) -> object:
+            assert method == "GET"
+            assert kwargs == {}
+
+            class Response:
+                def __init__(self) -> None:
+                    self.text = (
+                        '<input name="__RequestVerificationToken" '
+                        'value="token-dx">'
+                    )
+                    self.url = (
+                        "https://journalen.1177.se/"
+                        "JournalCategories/Diagnosis"
+                    )
+                    self.status_code = 200
+
+            assert str(url).endswith("/JournalCategories/Diagnosis")
+            return Response()
+
+    result = journal_client.bootstrap_diagnosis(FakeClient())
+    assert result.verification_token == "token-dx"
+    assert str(result.page_url).endswith("/JournalCategories/Diagnosis")
+
+
+def test_bankid_poll_payload_parsing_contract() -> None:
+    """BankID poll parser should accept dict payloads only."""
+    parsed = _parse_poll_payload(
+        '{"rfacode":"code-grp-rfa9","location":"/next"}',
+        "https://idp/mg-local/auth/ccp19/grp/pollstatus",
+    )
+    assert isinstance(parsed, dict)
+    assert parsed["rfacode"] == "code-grp-rfa9"
+    assert parsed["location"] == "/next"
+    assert parsed["__response_url"] == (
+        "https://idp/mg-local/auth/ccp19/grp/pollstatus"
+    )
+    assert _parse_poll_payload("[]", "https://idp/x") is None
+    assert _parse_poll_payload("<html></html>", "https://idp/x") is None
 
 
 def test_journal_extract_saml_form() -> None:
@@ -1267,6 +1751,50 @@ def test_extract_results_from_partial_view_list_posts_markup() -> None:
     assert "HbA1c" in str(rows[0]["summary"])
 
 
+def test_extract_diagnoses_from_partial_view_list_posts_markup() -> None:
+    """List-post diagnosis markup should expose structured fields."""
+    html = """
+    <ul>
+      <li class="nc-list-post">
+        <button class="nc-list-post-expander"
+          data-id="dx-123"
+          data-date="2026-03-11T09:00:00"
+          aria-label="E11.9 Diabetes typ 2"></button>
+      </li>
+    </ul>
+    """
+    rows = extract_diagnoses_from_partial_view(html)
+    assert len(rows) == 1
+    assert rows[0]["diagnosis_id"] == "dx-123"
+    assert rows[0]["recorded_date"] == "2026-03-11T09:00:00"
+    assert rows[0]["diagnosis_code"] == "E11.9"
+    assert "Diabetes" in str(rows[0]["summary"])
+
+
+def test_extract_diagnoses_from_partial_view_maps_summary_fields() -> None:
+    """Diagnosis summary text should map key structured fields."""
+    html = """
+    <ul>
+      <li class="nc-list-post">
+        <button class="nc-list-post-expander"
+          data-id="dx-999"
+          data-date="2026-04-23"
+          aria-label="Datum 2026-04-23, diagnos Hårcellsleukemi, antecknad av
+          Benson, Peter, (Läk), på Hematologimottagning Sahlgrenska,
+          Göteborg. Klicka för att visa detaljer."></button>
+      </li>
+    </ul>
+    """
+    rows = extract_diagnoses_from_partial_view(html)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["diagnosis_name"] == "Hårcellsleukemi"
+    assert row["recording_provider"] == "Benson, Peter, (Läk)"
+    assert row["care_unit"] == (
+        "Hematologimottagning Sahlgrenska, Göteborg"
+    )
+
+
 def test_sort_results_newest_first_keeps_undated_rows_last() -> None:
     """Newest entry_date should appear first and invalid dates last."""
     rows = [
@@ -1297,6 +1825,95 @@ def test_sort_results_newest_first_limit_returns_latest_entries() -> None:
     limited = _sort_results_newest_first(rows)[:2]
     summaries = [str(item["summary"]) for item in limited]
     assert summaries == ["r3", "r2"]
+
+
+def test_sort_diagnoses_newest_first_keeps_undated_rows_last() -> None:
+    """Newest diagnosis date should appear first, invalid dates last."""
+    rows = [
+        {"recorded_date": "2026-03-10T10:00:00", "summary": "older"},
+        {"recorded_date": None, "summary": "missing-date"},
+        {"recorded_date": "2026-03-12T08:00:00Z", "summary": "latest"},
+        {"recorded_date": "not-a-date", "summary": "invalid"},
+        {"recorded_date": "2026-03-11T10:00:00", "summary": "middle"},
+    ]
+    sorted_rows = _sort_diagnoses_newest_first(rows)
+    summaries = [str(item["summary"]) for item in sorted_rows]
+    assert summaries == [
+        "latest",
+        "middle",
+        "older",
+        "missing-date",
+        "invalid",
+    ]
+
+
+def test_poll_diagnosis_uses_json_filter_state() -> None:
+    """Diagnosis poll should use JSON fs contract and token header."""
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def request(self, method: str, url: str, **kwargs: object) -> object:
+            captured["method"] = method
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+
+            class Response:
+                def __init__(self, response_url: str) -> None:
+                    self.text = "{}"
+                    self.headers = {"Content-Type": "application/json"}
+                    self.url = response_url
+
+            return Response(url)
+
+    poll_diagnosis(FakeClient(), verification_token="token-diagnosis")
+    assert captured["method"] == "POST"
+    assert str(captured["url"]).endswith("/journalcategories/diagnosis/poll")
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    body = kwargs["json_body"]
+    assert isinstance(body, dict)
+    fs = body["fs"]
+    assert fs["Skip"] == 0
+    assert fs["Take"] == 20
+    assert fs["OrderDirection"] == "Descending"
+    assert fs["OrderByEnum"] == "DiagnosisDate"
+    assert fs["GetFiltersView"] is True
+    headers = kwargs["headers"]
+    assert isinstance(headers, dict)
+    assert headers["__RequestVerificationToken"] == "token-diagnosis"
+
+
+def test_diagnosis_poll_waits_until_done(monkeypatch: object) -> None:
+    """Diagnosis polling should continue until done."""
+    responses = [
+        {
+            "DataIsLoading": True,
+            "DataFetchingForAllBatchesIsDone": False,
+            "PartialView": "<ul><li>first</li></ul>",
+        },
+        {
+            "DataIsLoading": False,
+            "DataFetchingForAllBatchesIsDone": True,
+            "TotalNumberOfRows": 1,
+            "PartialView": "<ul><li>second</li></ul>",
+        },
+    ]
+
+    def fake_poll(*args: object, **kwargs: object) -> dict[str, object]:
+        return responses.pop(0)
+
+    monkeypatch.setattr(journal_client, "poll_diagnosis", fake_poll)
+    monkeypatch.setattr(journal_client.time, "sleep", lambda *_: None)
+    result = journal_client.poll_diagnosis_until_done(
+        object(),
+        poll_interval_seconds=0.0,
+    )
+    assert result["attempts"] == 2
+    assert result["timed_out"] is False
+    payload = result["payload"]
+    assert payload["DataFetchingForAllBatchesIsDone"] is True
+    assert "first" in str(result["combined_partial_view"])
+    assert "second" in str(result["combined_partial_view"])
 
 
 def test_poll_laboratory_outcome_uses_form_filters() -> None:
@@ -1372,6 +1989,132 @@ def test_results_poll_waits_until_done(monkeypatch: object) -> None:
     assert payload["DataFetchingForAllBatchesIsDone"] is True
     assert "first" in str(result["combined_partial_view"])
     assert "second" in str(result["combined_partial_view"])
+
+
+def test_fetch_diagnosis_detail_uses_post_contract() -> None:
+    """Diagnosis detail endpoint should post compatible id keys."""
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def request(self, method: str, url: str, **kwargs: object) -> object:
+            captured["method"] = method
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+
+            class Response:
+                def __init__(self, response_url: str) -> None:
+                    self.text = (
+                        '{"DetailView":"<dl><dt>Diagnoskod</dt>'
+                        "<dd>E11.9</dd>"
+                        "<dt>Diagnos</dt>"
+                        "<dd>Diabetes</dd>"
+                        "<dt>Vårdenhet</dt>"
+                        "<dd>Vardenhet A</dd>"
+                        "<dt>Okand etikett</dt>"
+                        '<dd>Extra</dd></dl>"}'
+                    )
+                    self.headers = {"Content-Type": "application/json"}
+                    self.url = response_url
+
+            return Response(url)
+
+    payload = fetch_diagnosis_detail(
+        FakeClient(),
+        diagnosis_id="dx-1",
+        verification_token="token-dx",
+    )
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    body = kwargs["data"]
+    assert isinstance(body, dict)
+    assert body["id"] == "dx-1"
+    headers = kwargs["headers"]
+    assert isinstance(headers, dict)
+    assert headers["__RequestVerificationToken"] == "token-dx"
+    core = payload["detail_core"]
+    assert isinstance(core, dict)
+    assert core["diagnosis_code"] == "E11.9"
+    assert core["diagnosis_name"] == "Diabetes"
+    assert core["care_unit"] == "Vardenhet A"
+    extra = payload["detail_extra"]
+    assert isinstance(extra, dict)
+    assert extra["okand_etikett"] == "Extra"
+
+
+def test_fetch_diagnosis_detail_retries_payload_shapes() -> None:
+    """Diagnosis detail should retry alternate keys on HTTP 500."""
+    calls: list[dict[str, object]] = []
+
+    class FakeClient:
+        def request(self, method: str, url: str, **kwargs: object) -> object:
+            calls.append(dict(kwargs))
+            if len(calls) == 1:
+                raise CliError(
+                    error="Upstream returned an error",
+                    code="upstream_error",
+                    exit_code=1,
+                    details={"status_code": 500, "host": "journalen.1177.se"},
+                )
+
+            class Response:
+                def __init__(self, response_url: str) -> None:
+                    self.text = '{"DetailView":"<dl></dl>"}'
+                    self.headers = {"Content-Type": "application/json"}
+                    self.url = response_url
+
+            return Response(url)
+
+    fetch_diagnosis_detail(
+        FakeClient(),
+        diagnosis_id="dx-2",
+        verification_token=None,
+    )
+    assert len(calls) == 2
+    first_data = calls[0]["data"]
+    second_data = calls[1]["data"]
+    assert isinstance(first_data, dict)
+    assert isinstance(second_data, dict)
+    assert sorted(first_data.keys()) == ["id"]
+    assert sorted(second_data.keys()) == ["diagnosisId"]
+
+
+def test_fetch_diagnosis_detail_extracts_text_fallback_fields() -> None:
+    """Diagnosis detail should parse structured fields from plain text."""
+
+    class FakeClient:
+        def request(self, method: str, url: str, **kwargs: object) -> object:
+            class Response:
+                def __init__(self, response_url: str) -> None:
+                    self.text = (
+                        '{"PartialView":"'
+                        "<div>Osignerad diagnos</div>"
+                        "<div>Diagnos: Lateral traumatisk meniskruptur i "
+                        "knaled</div>"
+                        "<div>2025-01-14 15:15</div>"
+                        "<div>Antecknad av</div>"
+                        "<div>Gudmundsson, Stefan (Lak)</div>"
+                        "<div>Operation 3 Molndal, Goteborg</div>"
+                        "<div>Huvuddiagnos</div>"
+                        '"}'
+                    )
+                    self.headers = {"Content-Type": "application/json"}
+                    self.url = response_url
+
+            return Response(url)
+
+    payload = fetch_diagnosis_detail(
+        FakeClient(),
+        diagnosis_id="dx-3",
+        verification_token=None,
+    )
+    core = payload["detail_core"]
+    assert isinstance(core, dict)
+    assert core["diagnosis_name"] == "Lateral traumatisk meniskruptur i knaled"
+    assert core["recorded_date"] == "2025-01-14 15:15"
+    assert core["recording_provider"] == "Gudmundsson, Stefan (Lak)"
+    assert core["care_unit"] == "Operation 3 Molndal, Goteborg"
+    assert core["diagnosis_type"] == "Huvuddiagnos"
+    assert core["review_status"] == "Osignerad diagnos"
 
 
 def test_fetch_laboratory_outcome_detail_uses_post_contract() -> None:
@@ -1591,4 +2334,39 @@ def test_get_laboratory_tool_data_contract() -> None:
     series = payload["series"]
     assert isinstance(series, list)
     assert series[0]["analysis_id"] == "NPU02902"
+
+
+def test_keep_alive_contract() -> None:
+    """Keep alive should post Poller endpoint and parse JSON payload."""
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def request(self, method: str, url: str, **kwargs: object) -> object:
+            captured["method"] = method
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+
+            class Response:
+                def __init__(self) -> None:
+                    self.text = (
+                        '{"Ok":true,'
+                        '"ServerTime":"2026-05-16T13:00:00Z"}'
+                    )
+                    self.headers = {"Content-Type": "application/json"}
+                    self.url = url
+
+            return Response()
+
+    payload = journal_client.keep_alive(FakeClient())
+    assert captured["method"] == "POST"
+    assert str(captured["url"]).endswith("/Handlers/Poller.ashx")
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    headers = kwargs["headers"]
+    assert isinstance(headers, dict)
+    assert headers["X-Requested-With"] == "XMLHttpRequest"
+    body = kwargs["data"]
+    assert isinstance(body, dict)
+    assert payload["Ok"] is True
+    assert payload["ServerTime"] == "2026-05-16T13:00:00Z"
 

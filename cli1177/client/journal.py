@@ -1904,6 +1904,54 @@ def bootstrap_laboratory_outcome(
     )
 
 
+def bootstrap_diagnosis(
+    client: HttpClient,
+    *,
+    debug_trace: list[dict[str, object]] | None = None,
+) -> JournalBootstrap:
+    """Open diagnosis page and extract anti-forgery token."""
+    url = f"{BASE_URL}/JournalCategories/Diagnosis"
+    response = client.request("GET", url)
+    _append_trace(
+        debug_trace,
+        action="bootstrap_diagnosis_get",
+        url=str(response.url),
+        status_code=response.status_code,
+    )
+    response_host = urlparse(str(response.url)).netloc
+    if "journalen.1177.se" not in response_host:
+        if not establish_journal_session(
+            client,
+            allow_interactive_step_up=True,
+            debug_trace=debug_trace,
+        ):
+            raise CliError(
+                error="Journal session is not authenticated",
+                code="auth_required",
+                exit_code=exit_codes.AUTH,
+                details={
+                    "response_url": str(response.url),
+                    "auth_trace": debug_trace,
+                },
+            )
+        response = client.request("GET", url)
+        _append_trace(
+            debug_trace,
+            action="bootstrap_diagnosis_get_retry",
+            url=str(response.url),
+            status_code=response.status_code,
+        )
+    soup = BeautifulSoup(response.text, "html.parser")
+    token_input = soup.select_one("input[name='__RequestVerificationToken']")
+    token = None
+    if token_input and token_input.get("value"):
+        token = str(token_input.get("value"))
+    return JournalBootstrap(
+        verification_token=token,
+        page_url=str(response.url),
+    )
+
+
 def poll_care_documentation(
     client: HttpClient,
     *,
@@ -2138,6 +2186,83 @@ def poll_laboratory_outcome_until_done(
     }
 
 
+def poll_diagnosis(
+    client: HttpClient,
+    *,
+    verification_token: str | None = None,
+) -> dict[str, Any]:
+    """Fetch diagnosis list payload."""
+    headers = dict(AJAX_JSON_HEADERS)
+    if verification_token:
+        headers["__RequestVerificationToken"] = verification_token
+    filter_state: dict[str, Any] = {
+        "Skip": 0,
+        "Take": 20,
+        "OrderDirection": "Descending",
+        "OrderByEnum": "DiagnosisDate",
+        "FilterArrays": {},
+        "GetFiltersView": True,
+    }
+    url = f"{BASE_URL}/journalcategories/diagnosis/poll"
+    response = client.request(
+        "POST",
+        url,
+        headers=headers,
+        json_body={"fs": filter_state},
+    )
+    payload = _parse_json_response(
+        response_text=response.text,
+        endpoint="diagnosis/poll",
+        request_url=url,
+        response_url=str(response.url),
+        content_type=response.headers.get("Content-Type", ""),
+    )
+    return payload
+
+
+def poll_diagnosis_until_done(
+    client: HttpClient,
+    *,
+    verification_token: str | None = None,
+    timeout_seconds: float = 8.0,
+    poll_interval_seconds: float = 0.35,
+) -> dict[str, Any]:
+    """Poll diagnosis until loading is done or timeout."""
+    started_at = time.monotonic()
+    attempts = 0
+    timed_out = False
+    payload: dict[str, Any] = {}
+    partial_fragments: list[str] = []
+    while True:
+        attempts += 1
+        payload = poll_diagnosis(
+            client,
+            verification_token=verification_token,
+        )
+        partial_html = str(payload.get("PartialView", ""))
+        if partial_html:
+            partial_fragments.append(partial_html)
+        done = bool(payload.get("DataFetchingForAllBatchesIsDone"))
+        loading = bool(payload.get("DataIsLoading"))
+        error_occurred = bool(payload.get("ErrorOccurred"))
+        fetch_timed_out = bool(payload.get("DataFetchingTimedOut"))
+        if done or not loading or error_occurred or fetch_timed_out:
+            break
+        elapsed = time.monotonic() - started_at
+        if elapsed >= timeout_seconds:
+            timed_out = True
+            break
+        time.sleep(max(0.0, poll_interval_seconds))
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    return {
+        "payload": payload,
+        "attempts": attempts,
+        "timed_out": timed_out,
+        "elapsed_ms": elapsed_ms,
+        "combined_partial_view": "".join(partial_fragments),
+    }
+
+
 def extract_rows_from_partial_view(partial_html: str) -> list[dict[str, str]]:
     """Extract coarse rows from poll PartialView HTML."""
     soup = BeautifulSoup(partial_html, "html.parser")
@@ -2180,6 +2305,126 @@ def extract_rows_from_partial_view(partial_html: str) -> list[dict[str, str]]:
     return []
 
 
+def _guess_diagnosis_code(text: str) -> str | None:
+    """Extract likely diagnosis code from row text."""
+    match = re.search(r"\b([A-Z][0-9][0-9A-Z](?:\.[0-9A-Z]{1,4})?)\b", text)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _extract_diagnosis_summary_fields(
+    summary: str,
+) -> dict[str, str | None]:
+    """Extract structured diagnosis fields from Swedish summary text."""
+    normalized = summary.replace("\r", " ").replace("\n", " ")
+    normalized = " ".join(normalized.split())
+    diagnosis_name: str | None = None
+    recording_provider: str | None = None
+    care_unit: str | None = None
+    diagnosis_match = re.search(
+        r"diagnos\s+(.+?),\s+antecknad\s+av\s+",
+        normalized,
+        re.IGNORECASE,
+    )
+    if diagnosis_match:
+        diagnosis_name = diagnosis_match.group(1).strip()
+    provider_match = re.search(
+        r"antecknad\s+av\s+(.+?),\s+på\s+",
+        normalized,
+        re.IGNORECASE,
+    )
+    if provider_match:
+        recording_provider = provider_match.group(1).strip()
+    care_unit_match = re.search(
+        r"\spå\s+(.+?)(?:,\s*osignerad)?\.\s+Klicka\s+för\s+att\s+"
+        r"visa\s+detaljer\.?$",
+        normalized,
+        re.IGNORECASE,
+    )
+    if care_unit_match:
+        care_unit = care_unit_match.group(1).strip()
+    return {
+        "diagnosis_name": diagnosis_name,
+        "recording_provider": recording_provider,
+        "care_unit": care_unit,
+    }
+
+
+def extract_diagnoses_from_partial_view(
+    partial_html: str,
+) -> list[dict[str, str | None]]:
+    """Extract structured diagnosis rows from partial HTML."""
+    soup = BeautifulSoup(partial_html, "html.parser")
+    rows: list[dict[str, str | None]] = []
+    post_rows = soup.select("li.nc-list-post button.nc-list-post-expander")
+    for row in post_rows:
+        summary = str(row.get("aria-label", "")).strip()
+        if not summary:
+            summary = row.get_text(" ", strip=True)
+        if not summary:
+            continue
+        structured = _extract_diagnosis_summary_fields(summary)
+        row_id = str(row.get("data-id", "")).strip()
+        row_date = str(row.get("data-date", "")).strip()
+        rows.append(
+            {
+                "diagnosis_id": row_id or None,
+                "recorded_date": row_date or None,
+                "diagnosis_code": _guess_diagnosis_code(summary),
+                "diagnosis_name": structured["diagnosis_name"],
+                "recording_provider": structured["recording_provider"],
+                "care_unit": structured["care_unit"],
+                "summary": unescape(summary),
+                "raw_text": unescape(summary),
+            },
+        )
+    if rows:
+        return rows
+
+    table_rows = soup.select("tr")
+    for row in table_rows:
+        cells = [cell.get_text(" ", strip=True) for cell in row.select("td")]
+        if not cells:
+            continue
+        summary = " | ".join(cells)
+        recorded_date = cells[0] if len(cells) > 0 else ""
+        diagnosis_code = cells[1] if len(cells) > 1 else ""
+        diagnosis_name = cells[2] if len(cells) > 2 else ""
+        recording_provider = cells[3] if len(cells) > 3 else ""
+        care_unit = cells[4] if len(cells) > 4 else ""
+        rows.append(
+            {
+                "diagnosis_id": None,
+                "recorded_date": recorded_date or None,
+                "diagnosis_code": diagnosis_code or None,
+                "diagnosis_name": diagnosis_name or None,
+                "recording_provider": recording_provider or None,
+                "care_unit": care_unit or None,
+                "summary": summary,
+                "raw_text": summary,
+            },
+        )
+    if rows:
+        return rows
+
+    text = soup.get_text("\n", strip=True)
+    if text:
+        return [
+            {
+                "diagnosis_id": None,
+                "recorded_date": None,
+                "diagnosis_code": _guess_diagnosis_code(text),
+                "diagnosis_name": None,
+                "recording_provider": None,
+                "care_unit": None,
+                "summary": text,
+                "raw_text": text,
+            },
+        ]
+    return []
+
+
 def _normalize_result_field_name(label: str) -> str:
     base = unicodedata.normalize("NFKD", label).encode(
         "ascii",
@@ -2208,6 +2453,30 @@ def _canonical_result_detail_key(normalized_label: str) -> str | None:
         "referensintervall": "reference_interval",
         "vidimeringsstatus": "review_status",
         "ovidimerad": "review_status",
+    }
+    return canonical_map.get(normalized_label)
+
+
+def _canonical_diagnosis_detail_key(normalized_label: str) -> str | None:
+    """Map normalized diagnosis labels to stable JSON keys."""
+    canonical_map = {
+        "diagnoskod": "diagnosis_code",
+        "icd_10_kod": "diagnosis_code",
+        "icd10_kod": "diagnosis_code",
+        "diagnos": "diagnosis_name",
+        "diagnosnamn": "diagnosis_name",
+        "diagnos_beskrivning": "diagnosis_name",
+        "datum": "recorded_date",
+        "diagnosdatum": "recorded_date",
+        "registreringsdatum": "recorded_date",
+        "registrerad": "recorded_date",
+        "lakare": "recording_provider",
+        "ansvarig_lakare": "recording_provider",
+        "journalforare": "recording_provider",
+        "vardenhet": "care_unit",
+        "enhet": "care_unit",
+        "vardgivare": "care_provider",
+        "vardkontakt": "care_contact",
     }
     return canonical_map.get(normalized_label)
 
@@ -2401,6 +2670,175 @@ def _parse_detail_html(detail_html: str) -> dict[str, Any]:
         "extra_fields": extra_fields,
         "measurements": measurements,
         "text": soup.get_text("\n", strip=True),
+    }
+
+
+def _parse_diagnosis_detail_html(detail_html: str) -> dict[str, Any]:
+    """Parse diagnosis detail HTML into structured fields."""
+    soup = BeautifulSoup(detail_html, "html.parser")
+    fields: dict[str, str] = {}
+    core_fields: dict[str, str] = {}
+    extra_fields: dict[str, str] = {}
+    for row in soup.select("dl > dt"):
+        label = row.get_text(" ", strip=True)
+        value_node = row.find_next_sibling("dd")
+        if not label or value_node is None:
+            continue
+        value = value_node.get_text(" ", strip=True)
+        normalized_label = _normalize_result_field_name(label)
+        fields[normalized_label] = value
+        canonical_key = _canonical_diagnosis_detail_key(normalized_label)
+        if canonical_key:
+            core_fields[canonical_key] = value
+        else:
+            extra_fields[normalized_label] = value
+    if not fields:
+        for row in soup.select("table tr"):
+            cells = row.select("th, td")
+            if len(cells) < 2:
+                continue
+            label = cells[0].get_text(" ", strip=True)
+            value = cells[1].get_text(" ", strip=True)
+            if not label:
+                continue
+            normalized_label = _normalize_result_field_name(label)
+            fields[normalized_label] = value
+            canonical_key = _canonical_diagnosis_detail_key(normalized_label)
+            if canonical_key:
+                core_fields[canonical_key] = value
+            else:
+                extra_fields[normalized_label] = value
+    text = soup.get_text("\n", strip=True)
+    if "diagnosis_code" not in core_fields:
+        guessed_code = _guess_diagnosis_code(text)
+        if guessed_code:
+            core_fields["diagnosis_code"] = guessed_code
+    text_lines = [
+        line.strip()
+        for line in text.split("\n")
+        if isinstance(line, str) and line.strip()
+    ]
+    if "diagnosis_name" not in core_fields:
+        diagnosis_line_match = re.search(
+            r"Diagnos:\s*([^\n]+)",
+            text,
+            re.IGNORECASE,
+        )
+        if diagnosis_line_match:
+            core_fields["diagnosis_name"] = diagnosis_line_match.group(1).strip()
+    if "recorded_date" not in core_fields:
+        datetime_match = re.search(
+            r"\b(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\b",
+            text,
+        )
+        if datetime_match:
+            core_fields["recorded_date"] = datetime_match.group(1).strip()
+    if "recording_provider" not in core_fields:
+        for index, line in enumerate(text_lines):
+            if line.lower() != "antecknad av":
+                continue
+            if index + 1 < len(text_lines):
+                core_fields["recording_provider"] = text_lines[index + 1]
+            if index + 2 < len(text_lines):
+                core_fields["care_unit"] = text_lines[index + 2]
+            break
+    if "diagnosis_type" not in core_fields:
+        for candidate in ("Huvuddiagnos", "Bidiagnos"):
+            if candidate.lower() in text.lower():
+                core_fields["diagnosis_type"] = candidate
+                break
+    if "review_status" not in core_fields:
+        if "Osignerad diagnos" in text:
+            core_fields["review_status"] = "Osignerad diagnos"
+        elif "Signerad diagnos" in text:
+            core_fields["review_status"] = "Signerad diagnos"
+    return {
+        "fields": fields,
+        "core_fields": core_fields,
+        "extra_fields": extra_fields,
+        "text": text,
+    }
+
+
+def fetch_diagnosis_detail(
+    client: HttpClient,
+    *,
+    diagnosis_id: str,
+    verification_token: str | None = None,
+) -> dict[str, Any]:
+    """Fetch detail for one diagnosis row."""
+    headers = dict(AJAX_HEADERS)
+    if verification_token:
+        headers["__RequestVerificationToken"] = verification_token
+    url = f"{BASE_URL}/journalcategories/diagnosis/detailview"
+    candidates = [
+        {"id": diagnosis_id},
+        {"diagnosisId": diagnosis_id},
+        {"entryId": diagnosis_id},
+        {
+            "id": diagnosis_id,
+            "diagnosisId": diagnosis_id,
+            "entryId": diagnosis_id,
+        },
+    ]
+    response: Any | None = None
+    last_error: CliError | None = None
+    for candidate in candidates:
+        try:
+            response = client.request(
+                "POST",
+                url,
+                headers=headers,
+                data=candidate,
+            )
+            break
+        except CliError as exc:
+            last_error = exc
+            status_code = int(exc.details.get("status_code", 0))
+            if exc.code == "upstream_error" and status_code == 500:
+                continue
+            raise
+    if response is None:
+        details = {
+            "diagnosis_id": diagnosis_id,
+            "hint": (
+                "run `1177 journal diagnoses list` and retry "
+                "with a fresh id"
+            ),
+            "attempted_payloads": [sorted(item.keys()) for item in candidates],
+        }
+        if last_error is not None:
+            details["upstream_status_code"] = last_error.details.get(
+                "status_code",
+            )
+            details["upstream_host"] = last_error.details.get("host")
+        raise CliError(
+            error="Could not load detail for diagnosis id",
+            code="detail_unavailable",
+            exit_code=exit_codes.UPSTREAM,
+            details=details,
+        )
+    payload = _parse_json_response(
+        response_text=response.text,
+        endpoint="diagnosis/detailview",
+        request_url=url,
+        response_url=str(response.url),
+        content_type=response.headers.get("Content-Type", ""),
+    )
+    detail_html = str(
+        payload.get("DetailView")
+        or payload.get("PartialView")
+        or payload.get("Html")
+        or "",
+    )
+    parsed = _parse_diagnosis_detail_html(detail_html)
+    return {
+        "detail_core": parsed["core_fields"],
+        "detail_extra": parsed["extra_fields"],
+        "detail_fields": parsed["fields"],
+        "detail_text": parsed["text"],
+        "detail_html": detail_html,
+        "detail_payload": payload,
     }
 
 
