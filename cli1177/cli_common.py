@@ -22,6 +22,12 @@ _SPINNER_FRAMES = ("|", "/", "-", "\\")
 _SPINNER_MESSAGE = "Loading..."
 
 
+def _is_auth_login_command(command_path: str) -> bool:
+    """Return True when current command is auth login."""
+    parts = [part.strip().lower() for part in command_path.split() if part]
+    return len(parts) >= 2 and parts[-2:] == ["auth", "login"]
+
+
 class _DelayedSpinner:
     """Render a lightweight delayed spinner on stderr."""
 
@@ -87,9 +93,14 @@ class _DelayedSpinner:
 def run_json(callable_fn: Callable[[], dict[str, Any]]) -> None:
     """Run a command and print stable success/error payloads."""
     try:
-        with _DelayedSpinner():
-            payload = callable_fn()
         ctx = click.get_current_context(silent=True)
+        command_path = ctx.command_path if ctx else ""
+        use_spinner = not _is_auth_login_command(command_path)
+        if use_spinner:
+            with _DelayedSpinner():
+                payload = callable_fn()
+        else:
+            payload = callable_fn()
         runtime = ctx.obj if ctx else None
         output_format = "json"
         if isinstance(runtime, Runtime):

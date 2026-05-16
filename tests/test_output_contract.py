@@ -7,8 +7,10 @@ import re
 import time
 from pathlib import Path
 
+import click
 from typer.testing import CliRunner
 
+from cli1177 import exit_codes
 import cli1177.cli_common as cli_common
 import cli1177.client.journal as journal_client
 import cli1177.commands.auth as auth_commands
@@ -168,6 +170,56 @@ def test_delayed_spinner_renders_on_tty_for_slow_calls() -> None:
         time.sleep(0.05)
     rendered = "".join(stream.writes)
     assert "Loading..." in rendered
+
+
+def test_spinner_disabled_for_auth_login_command_path() -> None:
+    """Auth login command should skip spinner to keep QR view clean."""
+    assert cli_common._is_auth_login_command("1177 auth login")
+    assert cli_common._is_auth_login_command("cli auth login")
+    assert cli_common._is_auth_login_command("AUTH LOGIN")
+    assert not cli_common._is_auth_login_command("1177 auth status")
+    assert not cli_common._is_auth_login_command("1177 journal results list")
+
+
+def test_run_json_propagates_cli_error_exit_code(capsys: object) -> None:
+    """run_json should exit with CliError's configured non-zero code."""
+
+    def execute() -> dict[str, object]:
+        raise CliError(
+            error="Access denied by upstream",
+            code="forbidden",
+            exit_code=exit_codes.FORBIDDEN,
+            details={"url": "https://journalen.1177.se/Dashboard"},
+        )
+
+    try:
+        cli_common.run_json(execute)
+    except click.exceptions.Exit as exc:
+        assert exc.exit_code == exit_codes.FORBIDDEN
+    else:
+        assert False, "expected click Exit from run_json"
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.err.strip())
+    assert payload["code"] == "forbidden"
+
+
+def test_run_json_unexpected_error_exits_nonzero(capsys: object) -> None:
+    """run_json should map unexpected failures to a non-zero code."""
+
+    def execute() -> dict[str, object]:
+        raise RuntimeError("boom")
+
+    try:
+        cli_common.run_json(execute)
+    except click.exceptions.Exit as exc:
+        assert exc.exit_code == exit_codes.UPSTREAM
+    else:
+        assert False, "expected click Exit from run_json"
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.err.strip())
+    assert payload["code"] == "internal_error"
 
 
 def test_journal_help_contains_results_group() -> None:
@@ -648,6 +700,137 @@ def test_auth_login_failed_step_up_triggers_playwright_fallback(
     )
     assert result.exit_code == 2
     assert fallback_called["value"] is True
+
+
+def test_auth_login_blocked_journal_returns_auth_exit_code(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    """Blocked journal session must fail auth login with non-zero exit."""
+    monkeypatch.setattr(
+        auth_commands,
+        "_check_session_alive",
+        lambda runtime: False,
+    )
+    monkeypatch.setattr(
+        auth_commands,
+        "establish_journal_session",
+        lambda *_args, **_kwargs: False,
+    )
+
+    state_file = tmp_path / "auth-state.json"
+    xdg_state_home = tmp_path / "xdg-state"
+    result = runner.invoke(
+        app,
+        ["auth", "login"],
+        env={
+            "CLI1177_AUTH_STATE_PATH": str(state_file),
+            "XDG_STATE_HOME": str(xdg_state_home),
+        },
+    )
+
+    assert result.exit_code == exit_codes.AUTH
+    assert not result.stdout.strip()
+
+
+def test_establish_session_forbidden_dashboard_returns_false() -> None:
+    """Dashboard 403 on Journalen should never be treated as ready."""
+    calls: list[tuple[str, str]] = []
+
+    class Response:
+        def __init__(self, url: str, status_code: int) -> None:
+            self.url = url
+            self.status_code = status_code
+            self.text = "<html>forbidden</html>"
+            self.headers: dict[str, str] = {}
+            self.history: list[object] = []
+
+    class FakeClient:
+        cookies: list[dict[str, str]] = []
+
+        def request(self, method: str, url: str, **kwargs: object) -> Response:
+            calls.append((method, url))
+            assert kwargs["allow_status"] == {200, 302, 401, 403}
+            if url.endswith("/Dashboard"):
+                return Response(url, 403)
+            raise AssertionError(f"unexpected URL: {url}")
+
+        def set_cookies(self, cookies: list[dict[str, str]]) -> None:
+            self.cookies = cookies
+
+    assert journal_client.establish_journal_session(FakeClient()) is False
+    assert calls == [("GET", "https://journalen.1177.se/Dashboard")]
+
+
+def test_establish_session_forbidden_probe_returns_false() -> None:
+    """Probe 403 must not be interpreted as authenticated session."""
+
+    class Response:
+        def __init__(self, url: str, status_code: int) -> None:
+            self.url = url
+            self.status_code = status_code
+            self.text = "<html></html>"
+            self.headers: dict[str, str] = {}
+            self.history: list[object] = []
+
+    class FakeClient:
+        cookies: list[dict[str, str]] = []
+
+        def request(self, method: str, url: str, **kwargs: object) -> Response:
+            assert kwargs["allow_status"] == {200, 302, 401, 403}
+            if url.endswith("/Dashboard"):
+                return Response(url, 200)
+            if "CareDocumentation" in url:
+                return Response(url, 403)
+            raise AssertionError(f"unexpected URL: {url}")
+
+    assert journal_client.establish_journal_session(FakeClient()) is False
+
+
+def test_establish_session_unauthorized_probe_returns_false() -> None:
+    """Probe 401 must not be interpreted as authenticated session."""
+
+    class Response:
+        def __init__(self, url: str, status_code: int) -> None:
+            self.url = url
+            self.status_code = status_code
+            self.text = "<html></html>"
+            self.headers: dict[str, str] = {}
+            self.history: list[object] = []
+
+    class FakeClient:
+        cookies: list[dict[str, str]] = []
+
+        def request(self, method: str, url: str, **kwargs: object) -> Response:
+            assert kwargs["allow_status"] == {200, 302, 401, 403}
+            if url.endswith("/Dashboard"):
+                return Response(url, 200)
+            if "CareDocumentation" in url:
+                return Response(url, 401)
+            raise AssertionError(f"unexpected URL: {url}")
+
+    assert journal_client.establish_journal_session(FakeClient()) is False
+
+
+def test_establish_session_successful_dashboard_and_probe() -> None:
+    """Ready session should still return True on successful responses."""
+
+    class Response:
+        def __init__(self, url: str, status_code: int) -> None:
+            self.url = url
+            self.status_code = status_code
+            self.text = "<html></html>"
+            self.headers: dict[str, str] = {}
+            self.history: list[object] = []
+
+    class FakeClient:
+        cookies: list[dict[str, str]] = []
+
+        def request(self, method: str, url: str, **kwargs: object) -> Response:
+            assert kwargs["allow_status"] == {200, 302, 401, 403}
+            return Response(url, 200)
+
+    assert journal_client.establish_journal_session(FakeClient()) is True
 
 
 def test_bankid_rfa9_progress_state_not_terminal() -> None:

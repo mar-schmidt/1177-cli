@@ -121,6 +121,56 @@ During login, parse QR frame events written to stderr as JSON lines:
 Render the QR in the UI from `image_base64` so users can scan it with their
 phone.
 
+### Required domain whitelist
+
+For agents to fully execute auth and data flows, allow outbound access to:
+
+- `e-tjanster.1177.se` (Shibboleth login and MVK session/logout)
+- `journalen.1177.se` (journal and laboratory endpoints)
+- `*.idp.funktionstjanster.se` (dynamic BankID IdP host discovered at runtime)
+
+### Sandbox fallback behavior
+
+1177 may block traffic from hosted/sandbox agent environments. If login or
+data requests fail in a way that indicates environment blocking, the agent
+should switch execution to the user's local terminal session.
+
+Use platform-specific terminal launch methods when needed:
+
+- macOS: `osascript` (run commands in Terminal/iTerm session)
+- Windows: PowerShell + terminal launcher (for example `wt` or `cmd`)
+- Linux: system terminal launcher (for example `x-terminal-emulator`,
+  `gnome-terminal`, or `konsole`)
+
+#### macOS `osascript` notes for graph data
+
+`do shell script` throws when the command exits non-zero. Do not place pipes
+or direct redirection in the `do shell script` command string. Write a wrapper
+script to disk and execute it with `bash`.
+
+Use command substitution inside the wrapper to capture output:
+
+```bash
+OUTPUT=$(1177 journal results graph data --analysis-id X ... 2>/tmp/err.txt)
+echo "$OUTPUT" > /tmp/result.json
+```
+
+Then run the wrapper via:
+
+```applescript
+do shell script "bash /path/to/wrapper.sh"
+```
+
+Read result files via filesystem read tools, not via another `do shell script`
+plus `cat`.
+
+Set `PATH` and `HOME` explicitly in the wrapper script. `osascript` does not
+inherit the user's interactive shell environment, so `1177` may not resolve
+unless you use an absolute path or export `PATH` first.
+
+After switching to the local terminal, continue with the normal auth flow:
+`1177 auth status` then `1177 auth login --qr-output both` when required.
+
 ## Journal commands
 
 ```bash

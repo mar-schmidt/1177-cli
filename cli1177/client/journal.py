@@ -340,8 +340,10 @@ def _is_step_up_terminal_failure(rfa_code: str, status_text: str) -> bool:
     return False
 
 
-def _is_authenticated_journal_url(url: str) -> bool:
+def _is_authenticated_journal_url(url: str, status_code: int) -> bool:
     """True when URL points to an authenticated Journal page."""
+    if status_code >= 400:
+        return False
     parsed = urlparse(url)
     if "journalen.1177.se" not in parsed.netloc:
         return False
@@ -697,6 +699,7 @@ def _append_trace(
 def _follow_idp_chain(
     client: HttpClient,
     response_url: str,
+    response_status_code: int,
     html: str,
     *,
     allow_interactive_step_up: bool,
@@ -707,6 +710,7 @@ def _follow_idp_chain(
 ) -> bool:
     """Traverse intermediate IdP pages until Journalen or failure."""
     current_url = response_url
+    current_status_code = response_status_code
     current_html = html
     last_url = ""
     same_url_count = 0
@@ -829,10 +833,11 @@ def _follow_idp_chain(
                 )
                 # endregion
                 current_url = new_url
+                current_status_code = 200 if ok else 403
                 current_html = new_html
                 if ok:
                     continue
-        if _is_authenticated_journal_url(current_url):
+        if _is_authenticated_journal_url(current_url, current_status_code):
             _append_trace(
                 debug_trace,
                 action="idp_chain_reached_journal",
@@ -1359,6 +1364,7 @@ def _follow_idp_chain(
                             )
                             # endregion
             current_url = str(resp.url)
+            current_status_code = resp.status_code
             current_html = resp.text
             _append_trace(
                 debug_trace,
@@ -1434,6 +1440,7 @@ def _follow_idp_chain(
             )
             # endregion
             current_url = str(resp.url)
+            current_status_code = resp.status_code
             current_html = resp.text
             _append_trace(
                 debug_trace,
@@ -1514,6 +1521,7 @@ def _follow_idp_chain(
             )
             # endregion
             current_url = str(resp.url)
+            current_status_code = resp.status_code
             current_html = resp.text
             _append_trace(
                 debug_trace,
@@ -1531,6 +1539,7 @@ def _follow_idp_chain(
                 allow_status={200, 302, 401, 403},
             )
             current_url = str(resp.url)
+            current_status_code = resp.status_code
             current_html = resp.text
             _append_trace(
                 debug_trace,
@@ -1568,6 +1577,7 @@ def _follow_idp_chain(
             allow_status={200, 302, 401, 403},
         )
         current_url = str(resp.url)
+        current_status_code = resp.status_code
         current_html = resp.text
         _append_trace(
             debug_trace,
@@ -1607,7 +1617,7 @@ def establish_journal_session(
         status_code=response.status_code,
     )
     response_host = urlparse(response_url).netloc
-    if _is_authenticated_journal_url(response_url):
+    if _is_authenticated_journal_url(response_url, response.status_code):
         probe = client.request(
             "GET",
             f"{BASE_URL}/JournalCategories/CareDocumentation",
@@ -1619,6 +1629,8 @@ def establish_journal_session(
             url=str(probe.url),
             status_code=probe.status_code,
         )
+        if probe.status_code >= 400:
+            return False
         return "journalen.1177.se" in urlparse(str(probe.url)).netloc
 
     if allow_interactive_step_up and "journalen.1177.se" not in response_host:
@@ -1650,6 +1662,7 @@ def establish_journal_session(
     if not _follow_idp_chain(
         client,
         response_url,
+        response.status_code,
         response.text,
         allow_interactive_step_up=allow_interactive_step_up,
         debug_trace=debug_trace,
@@ -1669,6 +1682,8 @@ def establish_journal_session(
         url=str(probe.url),
         status_code=probe.status_code,
     )
+    if probe.status_code >= 400:
+        return False
     return "journalen.1177.se" in urlparse(str(probe.url)).netloc
 
 
