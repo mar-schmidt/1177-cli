@@ -650,13 +650,3 @@ def login_with_bankid_qr(
         poll_interval_ms = int(str(poll.get("pollinterval", "1000")))
         time.sleep(max(0.4, poll_interval_ms / 1000))
 
-
-def login_with_playwright_fallback() -> None:
-    """Fallback placeholder for browser-assisted auth bootstrap."""
-    raise CliError(
-        error="Playwright fallback is not yet implemented",
-        code="playwright_not_implemented",
-        exit_code=exit_codes.UPSTREAM,
-        details={"hint": "Install extra and implement browser bootstrap."},
-    )
-

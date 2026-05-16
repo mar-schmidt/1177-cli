@@ -1129,43 +1129,6 @@ def test_journal_diagnoses_detail_uses_structured_payload(
     assert "detail_payload" not in payload
 
 
-def test_auth_login_failed_step_up_triggers_playwright_fallback(
-    monkeypatch: object,
-    tmp_path: Path,
-) -> None:
-    """Failed journal step-up should trigger optional browser fallback."""
-    fallback_called = {"value": False}
-
-    monkeypatch.setattr(
-        auth_commands,
-        "_check_session_alive",
-        lambda runtime: False,
-    )
-    monkeypatch.setattr(
-        auth_commands,
-        "establish_journal_session",
-        lambda *_args, **_kwargs: False,
-    )
-    monkeypatch.setattr(
-        auth_commands,
-        "login_with_playwright_fallback",
-        lambda: fallback_called.update(value=True),
-    )
-
-    state_file = tmp_path / "auth-state.json"
-    xdg_state_home = tmp_path / "xdg-state"
-    result = runner.invoke(
-        app,
-        ["auth", "login", "--allow-playwright-fallback"],
-        env={
-            "CLI1177_AUTH_STATE_PATH": str(state_file),
-            "XDG_STATE_HOME": str(xdg_state_home),
-        },
-    )
-    assert result.exit_code == 2
-    assert fallback_called["value"] is True
-
-
 def test_auth_login_blocked_journal_returns_auth_exit_code(
     monkeypatch: object,
     tmp_path: Path,

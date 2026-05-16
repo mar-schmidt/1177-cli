@@ -17,13 +17,9 @@ import typer
 from cli1177 import exit_codes
 from cli1177.cli_common import run_json
 from cli1177.client.auth import AuthState, clear_auth_state, save_auth_state
-from cli1177.client.bankid import (
-    JOURNAL_DASHBOARD_URL,
-    login_with_playwright_fallback,
-)
+from cli1177.client.bankid import JOURNAL_DASHBOARD_URL
 from cli1177.client.http import HttpClient
 from cli1177.client.journal import establish_journal_session
-from cli1177.client.parity import probe_with_playwright
 from cli1177.errors import CliError
 from cli1177.runtime import Runtime
 
@@ -230,14 +226,6 @@ def login(
         "--method",
         help="Choose login method. Currently only bankid-qr is supported.",
     ),
-    allow_playwright_fallback: bool = typer.Option(
-        False,
-        "--allow-playwright-fallback",
-        help=(
-            "Allow a browser fallback step when the standard BankID flow "
-            "fails."
-        ),
-    ),
     qr_output: str = typer.Option(
         "terminal",
         "--qr-output",
@@ -378,8 +366,6 @@ def login(
                 **session_kwargs,
             )
             if not journal_ready:
-                if allow_playwright_fallback:
-                    login_with_playwright_fallback()
                 raise CliError(
                     error="BankID authentication failed",
                     code="auth_required",
@@ -474,49 +460,6 @@ def logout(ctx: typer.Context) -> None:
         clear_auth_state(runtime.paths)
         runtime.state = AuthState()
         return {"ok": True, "logged_in": False}
-
-    run_json(execute)
-
-
-@app.command("probe-browser-parity")
-def probe_browser_parity(
-    ctx: typer.Context,
-    url: str = typer.Option(
-        "https://journalen.1177.se/",
-        "--url",
-        help="Start URL to open when checking browser session behavior.",
-    ),
-    headless: bool = typer.Option(
-        True,
-        "--headless/--headed",
-        help="Run browser checks without or with a visible browser window.",
-    ),
-    timeout_ms: int = typer.Option(
-        30000,
-        "--timeout-ms",
-        help="Maximum time to wait for page navigation and redirects.",
-    ),
-) -> None:
-    """Collect browser-side redirect and cookie diagnostics.
-
-    Use this when API requests fail but you need browser parity debugging.
-    """
-
-    def execute() -> dict[str, object]:
-        runtime = _runtime(ctx)
-        if not runtime.state.cookies:
-            raise CliError(
-                error="Login required before browser parity probe",
-                code="auth_required",
-                exit_code=exit_codes.AUTH,
-                details={"hint": "Run `1177 auth login` first."},
-            )
-        return probe_with_playwright(
-            runtime.state.cookies,
-            url=url,
-            headless=headless,
-            timeout_ms=timeout_ms,
-        )
 
     run_json(execute)
 
